@@ -4,7 +4,9 @@ import sqlite3
 import bcrypt
 import os
 import json
+import re
 import smtplib
+import requests
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import google.generativeai as genai
@@ -25,6 +27,7 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 FROM_EMAIL = os.getenv("FROM_EMAIL") or SMTP_USER
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 
 if API_KEY:
     genai.configure(api_key=API_KEY)
@@ -392,56 +395,125 @@ def detect_page_offset(reader, max_scan=20):
                     return i - (n - 1)
     return 0
 
-def extract_financial_data(uploaded_file):
-    """Returns (data_dict, page_map) or (None, None) on failure.
+# Shared extraction prompt used by both Gemini and OpenRouter
+_DATA_PROMPT = """Analyze this financial report and extract the metrics below.
+Search the ENTIRE document — check financial highlights, per share data, investor information,
+and balance sheets, not just the income statement.
+If a value is not stated directly, DERIVE it using the formula in the description.
+Only use 0 if the value genuinely cannot be found or calculated.
+Return ONLY valid JSON, no markdown, no extra text.
 
-    page_map = {
-        'method':      'toc' | 'keyword_scan' | 'fallback',
-        'total_pages': int,
-        'sections':    [{'name', 'toc_page', 'pdf_pages'}, ...],
-        'pages_sent':  [int, ...],   # 1-based page numbers sent to Gemini
-    }
+{
+  "company_name": "Full legal company name from cover or header",
+  "ticker": "Stock ticker/symbol. Check: cover page, investor info, stock exchange listing, share data table. For Sri Lankan companies check CSE listing.",
+  "fiscal_year": "Financial year end year as YYYY",
+  "revenue": "For normal companies: total revenue/turnover in millions. For banks: Net Interest Income + Non-Interest Income (total operating income) in millions.",
+  "net_income": "Profit after tax / Net profit for the year in millions.",
+  "eps": "Earnings Per Share — find in Per Share Data table, Financial Highlights, or Five/Ten-Year Summary. Also labelled Basic EPS or Diluted EPS.",
+  "roe": "Return on Equity %. Find in Financial Ratios, KPIs, or Financial Highlights. If not stated, calculate as (Net Income / Average Shareholders Equity) x 100.",
+  "debt_to_equity": "Total Liabilities / Total Equity from the balance sheet. For banks this is typically 8-15. Calculate from balance sheet if not stated.",
+  "pe_ratio": "Price to Earnings ratio. Find in Investor Information, Share Data, Capital Market Information, or Financial Highlights. Use 0 only if completely absent.",
+  "pb_ratio": "Price to Book Value ratio. Find in Investor Information, Share Data, or Financial Highlights. Also labelled Market Price to Book Value or P/BV. Use 0 only if completely absent.",
+  "earnings_growth_5yr": "5-year earnings growth %. Find in Five/Ten-Year financial summary. Calculate as ((Latest EPS / EPS 5 years ago)^(1/5) - 1) x 100. Use 0 if only 1 year available.",
+  "current_assets": "For normal companies: current assets in millions. For banks: total assets due within 1 year, or total assets if not broken down by maturity.",
+  "current_liabilities": "For normal companies: current liabilities in millions. For banks: total liabilities due within 1 year, or total deposits + short-term borrowings.",
+  "dividend_paid": "Yes if any dividend was declared or paid this financial year, No otherwise.",
+  "intrinsic_value": "Stated intrinsic or fair value per share if mentioned, otherwise 0."
+}"""
+
+_TOC_KEYWORDS = [
+    "statement of financial position",
+    "statement of profit or loss and other comprehensive income",
+    "statement of profit or loss",
+    "statement of changes in equity",
+    "statement of cash flows",
+    "income statement",
+    "consolidated balance sheet",
+    "consolidated statement of income",
+    "consolidated statement of operations",
+    "consolidated statement of cash flows",
+    "consolidated statement of changes in equity",
+    "financial highlights",
+    "five year summary", "five-year summary",
+    "ten year summary", "ten-year summary",
+    "per share data", "share information",
+    "investor information", "shareholders information",
+    "capital market data", "financial ratios",
+    "key financial indicators", "key performance indicators",
+]
+
+
+def parse_toc_locally(toc_text):
+    financial_keywords = [
+        "income statement", "statement of profit or loss",
+        "statement of financial position", "balance sheet",
+        "statement of cash flows", "cash flow",
+        "statement of changes in equity", "changes in equity",
+        "comprehensive income", "financial highlights",
+        "five year", "five-year", "ten year", "ten-year",
+        "per share data", "investor information",
+        "shareholders information", "financial ratios",
+        "key financial indicators", "key performance indicators",
+        "capital market", "segmental", "segment result",
+    ]
+    sections = []
+    for line in toc_text.split('\n'):
+        clean = line.strip()
+        if len(clean) < 5:
+            continue
+        m = (re.search(r'^(.+?)\s*\.{2,}\s*(\d{1,4})\s*$', clean) or
+             re.search(r'^(.+?)\s{4,}(\d{1,4})\s*$', clean) or
+             re.search(r'^(.+?)\s*[-–—|]\s*(\d{1,4})\s*$', clean))
+        if not m:
+            continue
+        name = m.group(1).strip().rstrip('.')
+        page = int(m.group(2))
+        if 1 <= page <= 2000 and any(kw in name.lower() for kw in financial_keywords):
+            if not any(s['printed_page'] == page for s in sections):
+                sections.append({'name': name, 'printed_page': page})
+    return sections if len(sections) >= 2 else []
+
+
+def _find_relevant_pages(reader, allow_gemini_toc=True):
     """
-    if not API_KEY:
-        st.error("Missing Gemini API Key. Please set GEMINI_API_KEY in .env")
-        return None, None
+    Shared page-detection logic for both Gemini and OpenRouter.
+    Returns (page_map, sorted list of 0-based PDF indices).
+    allow_gemini_toc=False skips the Gemini TOC API call (used in OpenRouter mode).
+    """
+    total_pages = len(reader.pages)
+    page_map = {'method': None, 'total_pages': total_pages, 'sections': [], 'pages_sent': []}
 
-    page_map = {'method': None, 'total_pages': 0, 'sections': [], 'pages_sent': []}
+    st.info(f"📄 Report has {total_pages} pages. Reading table of contents...")
+    toc_text = ""
+    for i in range(min(10, total_pages)):
+        toc_text += f"\n--- PDF Page {i + 1} ---\n{reader.pages[i].extract_text() or ''}\n"
 
-    try:
-        reader = PdfReader(uploaded_file)
-        total_pages = len(reader.pages)
-        page_map['total_pages'] = total_pages
-        model = genai.GenerativeModel("gemini-flash-latest")
-
-        st.info(f"📄 Report has {total_pages} pages. Reading table of contents...")
-        toc_text = ""
-        for i in range(min(10, total_pages)):
-            toc_text += f"\n--- PDF Page {i + 1} ---\n{reader.pages[i].extract_text() or ''}\n"
-
+    local_sections = parse_toc_locally(toc_text)
+    if local_sections:
+        st.info(f"📋 TOC parsed locally — {len(local_sections)} sections found (no API call used).")
+        toc_data = {"toc_found": True, "sections": local_sections}
+    elif allow_gemini_toc:
+        st.info("📋 Local parse inconclusive — using Gemini to read table of contents...")
+        model = genai.GenerativeModel("gemini-2.0-flash")
         toc_prompt = f"""Analyze this text from the first pages of an annual financial report.
 Find the Table of Contents and identify the printed page numbers for ALL financial statement sections.
 
-Look for ANY of these sections (use exact names from the TOC, not these labels):
-- Income Statement
-- Statement of Profit or Loss / Statement of Profit or Loss and Other Comprehensive Income
-- Statement of Financial Position / Consolidated Balance Sheet / Balance Sheet
-- Statement of Changes in Equity / Statement of Changes in Equity – Group / Statement of Changes in Equity – Bank
-- Statement of Cash Flows / Consolidated Statement of Cash Flows
-- Notes to Financial Statements / Accounting Policies / Significant Accounting Policies
+Look for ANY of these sections:
+- Income Statement / Statement of Profit or Loss and Other Comprehensive Income
+- Statement of Financial Position / Consolidated Balance Sheet
+- Statement of Changes in Equity (Group and Bank variants)
+- Statement of Cash Flows
+- Notes to Financial Statements / Accounting Policies
 - Financial Highlights / Five-Year Summary / Ten-Year Summary / Key Financial Indicators
-- Per Share Data / Share Information / Investor Information / Shareholders Information / Capital Market Data
-- Financial Ratios / Key Performance Indicators / KPIs
-- Segmental Information / Segment Results
+- Per Share Data / Share Information / Investor Information / Capital Market Data
+- Financial Ratios / Key Performance Indicators / Segmental Information
 
 Return ONLY valid JSON (no markdown):
-{{"toc_found": true, "sections": [{{"name": "section name exactly as in TOC", "printed_page": 85}}]}}
-
+{{"toc_found": true, "sections": [{{"name": "exact section name from TOC", "printed_page": 85}}]}}
 If no TOC found: {{"toc_found": false, "sections": []}}
 
 Document text:
 {toc_text[:12000]}"""
-
         toc_resp = model.generate_content(toc_prompt)
         toc_raw = toc_resp.text.strip()
         if "```json" in toc_raw:
@@ -449,83 +521,68 @@ Document text:
         elif "```" in toc_raw:
             toc_raw = toc_raw.split("```")[1].split("```")[0].strip()
         toc_data = json.loads(toc_raw)
+    else:
+        toc_data = {"toc_found": False, "sections": []}
 
-        relevant_pdf_indices = set()
+    relevant_pdf_indices = set()
 
-        if toc_data.get("toc_found") and toc_data.get("sections"):
-            offset = detect_page_offset(reader)
-            page_map['method'] = 'toc'
-            st.success(f"✅ Table of Contents found — {len(toc_data['sections'])} financial sections identified.")
-
-            for sec in toc_data["sections"]:
-                printed = sec.get("printed_page", 0)
-                if printed > 0:
-                    pdf_idx = (printed - 1) + offset
-                    pages_for_sec = []
-                    for j in range(pdf_idx, min(pdf_idx + 3, total_pages)):
-                        if 0 <= j < total_pages:
-                            relevant_pdf_indices.add(j)
-                            pages_for_sec.append(j + 1)  # store 1-based for display
-                    page_map['sections'].append({
-                        'name':      sec.get('name', ''),
-                        'toc_page':  printed,
-                        'pdf_pages': pages_for_sec,
-                    })
-        else:
-            page_map['method'] = 'keyword_scan'
-            st.warning("⚠️ No Table of Contents detected — falling back to keyword scan.")
-            keywords = [
-                # Primary IFRS/SLFRS statement names (as seen in Sri Lankan reports)
-                "statement of financial position",
-                "statement of profit or loss and other comprehensive income",
-                "statement of profit or loss",
-                "statement of changes in equity",
-                "statement of cash flows",
-                "income statement",
-                # Consolidated variants
-                "consolidated balance sheet",
-                "consolidated statement of income",
-                "consolidated statement of operations",
-                "consolidated statement of cash flows",
-                "consolidated statement of changes in equity",
-                # Historical / ratio pages
-                "financial highlights",
-                "five year summary", "five-year summary",
-                "ten year summary", "ten-year summary",
-                "per share data", "share information",
-                "investor information", "shareholders information",
-                "capital market data", "financial ratios",
-                "key financial indicators", "key performance indicators",
-            ]
-            # Track first keyword match per page to avoid duplicates in page_map
-            page_keyword: dict = {}
-            for i, page in enumerate(reader.pages):
-                text = (page.extract_text() or "").lower()
-                for kw in keywords:
-                    if kw in text and i not in page_keyword:
-                        page_keyword[i] = kw
-                        relevant_pdf_indices.add(i)
-                        if i + 1 < total_pages:
-                            relevant_pdf_indices.add(i + 1)
-                        break
-            for pg_idx, kw in sorted(page_keyword.items()):
-                sent = [pg_idx + 1] + ([pg_idx + 2] if pg_idx + 1 < total_pages else [])
+    if toc_data.get("toc_found") and toc_data.get("sections"):
+        offset = detect_page_offset(reader)
+        page_map['method'] = 'toc'
+        st.success(f"✅ Table of Contents — {len(toc_data['sections'])} financial sections identified.")
+        for sec in toc_data["sections"]:
+            printed = sec.get("printed_page", 0)
+            if printed > 0:
+                pdf_idx = (printed - 1) + offset
+                pages_for_sec = []
+                for j in range(pdf_idx, min(pdf_idx + 3, total_pages)):
+                    if 0 <= j < total_pages:
+                        relevant_pdf_indices.add(j)
+                        pages_for_sec.append(j + 1)
                 page_map['sections'].append({
-                    'name':      kw.title(),
-                    'toc_page':  None,
-                    'pdf_pages': sent,
+                    'name': sec.get('name', ''), 'toc_page': printed, 'pdf_pages': pages_for_sec,
                 })
+    else:
+        page_map['method'] = 'keyword_scan'
+        st.warning("⚠️ No TOC detected — scanning all pages for financial statement keywords.")
+        page_keyword: dict = {}
+        for i, page in enumerate(reader.pages):
+            text = (page.extract_text() or "").lower()
+            for kw in _TOC_KEYWORDS:
+                if kw in text and i not in page_keyword:
+                    page_keyword[i] = kw
+                    relevant_pdf_indices.add(i)
+                    if i + 1 < total_pages:
+                        relevant_pdf_indices.add(i + 1)
+                    break
+        for pg_idx, kw in sorted(page_keyword.items()):
+            sent = [pg_idx + 1] + ([pg_idx + 2] if pg_idx + 1 < total_pages else [])
+            page_map['sections'].append({'name': kw.title(), 'toc_page': None, 'pdf_pages': sent})
 
-        if not relevant_pdf_indices:
-            page_map['method'] = 'fallback'
-            st.warning("⚠️ Could not identify financial pages — using first 15 pages.")
-            relevant_pdf_indices = set(range(min(15, total_pages)))
-            page_map['sections'] = [{'name': 'Fallback — first 15 pages', 'toc_page': None,
-                                      'pdf_pages': list(range(1, min(16, total_pages + 1)))}]
+    if not relevant_pdf_indices:
+        page_map['method'] = 'fallback'
+        st.warning("⚠️ Could not identify financial pages — using first 15 pages.")
+        relevant_pdf_indices = set(range(min(15, total_pages)))
+        page_map['sections'] = [{'name': 'Fallback — first 15 pages', 'toc_page': None,
+                                  'pdf_pages': list(range(1, min(16, total_pages + 1)))}]
 
-        relevant_pages = sorted(list(relevant_pdf_indices))
-        page_map['pages_sent'] = [p + 1 for p in relevant_pages]  # 1-based
-        st.info(f"🔍 Sending {len(relevant_pages)} targeted pages (out of {total_pages}) to Gemini.")
+    relevant_pages = sorted(list(relevant_pdf_indices))
+    page_map['pages_sent'] = [p + 1 for p in relevant_pages]
+    return page_map, relevant_pages
+
+
+def extract_financial_data(uploaded_file):
+    """Gemini path — uploads a cropped PDF for native PDF understanding."""
+    if not API_KEY:
+        st.error("Missing Gemini API Key. Please set GEMINI_API_KEY in .env")
+        return None, None
+
+    try:
+        reader = PdfReader(uploaded_file)
+        page_map, relevant_pages = _find_relevant_pages(reader, allow_gemini_toc=True)
+        total_pages = page_map['total_pages']
+
+        st.info(f"🔍 Uploading {len(relevant_pages)} of {total_pages} targeted pages to Gemini...")
 
         writer = PdfWriter()
         for p_idx in relevant_pages:
@@ -534,46 +591,10 @@ Document text:
         with open(cropped_pdf_path, "wb") as f:
             writer.write(f)
 
+        genai.configure(api_key=API_KEY)
         myfile = genai.upload_file(cropped_pdf_path)
-        data_prompt = """Analyze this financial report and extract the metrics below.
-For each metric, search the ENTIRE document — check financial highlights tables, per share data pages,
-investor information sections, and balance sheets, not just the income statement.
-If a value is not stated directly, DERIVE it using the formula in the description.
-Only use 0 if the value genuinely cannot be found or calculated from any available data.
-Return ONLY valid JSON, no markdown, no extra text.
-
-{
-  "company_name": "Full legal company name from cover or header",
-
-  "ticker": "Stock ticker/symbol. Check: cover page, investor information section, stock exchange listing page, or share data table. For Sri Lankan companies check CSE listing.",
-
-  "fiscal_year": "Financial year end year as YYYY",
-
-  "revenue": "For normal companies: total revenue/turnover in millions. For banks/financial institutions: Net Interest Income + Non-Interest Income (total operating income) in millions.",
-
-  "net_income": "Profit after tax / Net profit for the year in millions. Check income statement bottom line.",
-
-  "eps": "Earnings Per Share — find in: Per Share Data table, Financial Highlights, or Five/Ten-Year Summary. Also labelled 'Basic EPS' or 'Diluted EPS'.",
-
-  "roe": "Return on Equity as a percentage. Find in: Financial Ratios, Key Performance Indicators, or Financial Highlights table. If not stated, calculate as (Net Income / Average Shareholders Equity) x 100.",
-
-  "debt_to_equity": "Total Liabilities divided by Total Equity (Shareholders Funds) from the balance sheet. For banks this is typically 8-15. Calculate from balance sheet: Total Liabilities / Total Equity.",
-
-  "pe_ratio": "Price to Earnings ratio. Find in: Investor Information, Share Data, Capital Market Information, or Financial Highlights. Usually shown as 'P/E Ratio' or 'Price Earnings Ratio'. Use 0 only if completely absent.",
-
-  "pb_ratio": "Price to Book Value ratio. Find in: Investor Information, Share Data, or Financial Highlights. Also labelled 'Market Price to Book Value' or 'P/BV'. Use 0 only if completely absent.",
-
-  "earnings_growth_5yr": "5-year earnings growth as a percentage. Find in Five-Year or Ten-Year financial summary — calculate as: ((Latest EPS / EPS 5 years ago) ^ (1/5) - 1) x 100. If only 1 year available use 0.",
-
-  "current_assets": "For normal companies: current assets from balance sheet in millions. For banks: total assets due within 1 year, or total assets if not broken down by maturity (in millions).",
-
-  "current_liabilities": "For normal companies: current liabilities from balance sheet in millions. For banks: total liabilities due within 1 year, or total deposits + short-term borrowings if maturity breakdown unavailable (in millions).",
-
-  "dividend_paid": "'Yes' if any dividend was declared or paid this financial year, 'No' otherwise.",
-
-  "intrinsic_value": "Stated intrinsic or fair value per share if mentioned anywhere in the report, otherwise 0."
-}"""
-        response = model.generate_content([data_prompt, myfile])
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        response = model.generate_content([_DATA_PROMPT, myfile])
         raw_text = response.text.strip()
         if "```json" in raw_text:
             raw_text = raw_text.split("```json")[1].split("```")[0].strip()
@@ -587,6 +608,53 @@ Return ONLY valid JSON, no markdown, no extra text.
     finally:
         if os.path.exists("temp_report_cropped.pdf"):
             os.remove("temp_report_cropped.pdf")
+
+def extract_financial_data_openrouter(uploaded_file, model_id="openai/gpt-oss-120b:free"):
+    """OpenRouter path — extracts PDF text locally, sends as a text prompt."""
+    openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
+    if not openrouter_key:
+        st.error("Missing OpenRouter API Key. Please set OPENROUTER_API_KEY in .env")
+        return None, None
+
+    try:
+        reader = PdfReader(uploaded_file)
+        page_map, relevant_pages = _find_relevant_pages(reader, allow_gemini_toc=False)
+        total_pages = page_map['total_pages']
+
+        st.info(f"🔍 Extracting text from {len(relevant_pages)} of {total_pages} targeted pages...")
+
+        extracted_text = ""
+        for p_idx in relevant_pages:
+            extracted_text += f"\n--- Page {p_idx + 1} ---\n{reader.pages[p_idx].extract_text() or ''}\n"
+
+        headers = {
+            "Authorization": f"Bearer {openrouter_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": model_id,
+            "messages": [
+                {"role": "user", "content": _DATA_PROMPT + "\n\nDocument text:\n" + extracted_text[:60000]},
+            ],
+        }
+        resp = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=120,
+        )
+        resp.raise_for_status()
+        raw_text = resp.json()["choices"][0]["message"]["content"].strip()
+        if "```json" in raw_text:
+            raw_text = raw_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in raw_text:
+            raw_text = raw_text.split("```")[1].split("```")[0].strip()
+        return json.loads(raw_text), page_map
+
+    except Exception as e:
+        st.error(f"Error during AI analysis: {str(e)}")
+        return None, None
+
 
 # ============================================================
 # SESSION STATE & DB INIT
@@ -669,13 +737,33 @@ else:
         uploaded_file = st.file_uploader("Drop PDF here", type="pdf")
 
         if uploaded_file:
-            if st.button("Run Analysis"):
+            _MODELS = {
+                "Gemini 2.0 Flash": None,
+                "GPT-OSS 120B — OpenRouter (Free)": "openai/gpt-oss-120b:free",
+                "Gemma 4 31B — OpenRouter (Free)": "google/gemma-4-31b-it:free",
+                "DeepSeek V4 Flash — OpenRouter (Free)": "deepseek/deepseek-v4-flash:free",
+            }
+            col_model, col_btn = st.columns([3, 1])
+            with col_model:
+                selected_model = st.selectbox(
+                    "AI Model",
+                    list(_MODELS.keys()),
+                    label_visibility="collapsed",
+                )
+            with col_btn:
+                run_analysis = st.button("Run Analysis", use_container_width=True)
+
+            if run_analysis:
                 # Clear any previous state so the edit form always shows fresh
                 st.session_state.last_analysis = None
                 st.session_state.extracted_data = None
                 st.session_state.page_map = None
                 with st.spinner("Reading table of contents and extracting financial data..."):
-                    raw, page_map = extract_financial_data(uploaded_file)
+                    model_id = _MODELS[selected_model]
+                    if model_id is None:
+                        raw, page_map = extract_financial_data(uploaded_file)
+                    else:
+                        raw, page_map = extract_financial_data_openrouter(uploaded_file, model_id)
                     if raw:
                         st.session_state.extracted_data = raw
                         st.session_state.page_map = page_map
