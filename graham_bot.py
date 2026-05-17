@@ -383,6 +383,44 @@ def send_test_email(to_email):
 # ============================================================
 # AI DATA EXTRACTION
 # ============================================================
+def _parse_json_response(text):
+    """
+    Robustly extract a JSON object from a model response.
+    Handles: <think> blocks, markdown fences, leading/trailing prose,
+    trailing commas, and other common model quirks.
+    """
+    # Strip reasoning/thinking blocks (DeepSeek, o1-style models)
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<reasoning>.*?</reasoning>', '', text, flags=re.DOTALL)
+    text = text.strip()
+
+    # Strip markdown code fences
+    if "```json" in text:
+        text = text.split("```json")[1].split("```")[0].strip()
+    elif "```" in text:
+        text = text.split("```")[1].split("```")[0].strip()
+
+    # Try direct parse
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Extract first { ... last } and try again
+    start = text.find('{')
+    end = text.rfind('}')
+    if start != -1 and end > start:
+        chunk = text[start:end + 1]
+        try:
+            return json.loads(chunk)
+        except json.JSONDecodeError:
+            # Remove trailing commas before ] or } and retry
+            chunk = re.sub(r',\s*([}\]])', r'\1', chunk)
+            return json.loads(chunk)
+
+    raise ValueError(f"No JSON object found in model response: {text[:200]}")
+
+
 def detect_page_offset(reader, max_scan=20):
     for i in range(min(max_scan, len(reader.pages))):
         text = reader.pages[i].extract_text() or ""
@@ -600,12 +638,7 @@ If no contents entries are readable: {{"toc_found": false, "sections": []}}
 Document text:
 {toc_text[:12000]}"""
                 toc_resp = model.generate_content(toc_prompt)
-                toc_raw = toc_resp.text.strip()
-                if "```json" in toc_raw:
-                    toc_raw = toc_raw.split("```json")[1].split("```")[0].strip()
-                elif "```" in toc_raw:
-                    toc_raw = toc_raw.split("```")[1].split("```")[0].strip()
-                toc_data = json.loads(toc_raw)
+                toc_data = _parse_json_response(toc_resp.text)
             # If heading was found but all parsers failed: toc_data stays {toc_found: False}
             # → falls through to the first-15-pages fallback below (NOT a keyword scan)
     else:
@@ -692,12 +725,7 @@ def extract_financial_data(uploaded_file):
         myfile = genai.upload_file(cropped_pdf_path)
         model = genai.GenerativeModel("gemini-2.0-flash")
         response = model.generate_content([_DATA_PROMPT, myfile])
-        raw_text = response.text.strip()
-        if "```json" in raw_text:
-            raw_text = raw_text.split("```json")[1].split("```")[0].strip()
-        elif "```" in raw_text:
-            raw_text = raw_text.split("```")[1].split("```")[0].strip()
-        return json.loads(raw_text), page_map
+        return _parse_json_response(response.text), page_map
 
     except Exception as e:
         st.error(f"Error during AI analysis: {str(e)}")
@@ -742,12 +770,8 @@ def extract_financial_data_openrouter(uploaded_file, model_id="openai/gpt-oss-12
         )
         resp.raise_for_status()
         msg = resp.json()["choices"][0]["message"]
-        raw_text = (msg.get("content") or msg.get("reasoning_content") or "").strip()
-        if "```json" in raw_text:
-            raw_text = raw_text.split("```json")[1].split("```")[0].strip()
-        elif "```" in raw_text:
-            raw_text = raw_text.split("```")[1].split("```")[0].strip()
-        return json.loads(raw_text), page_map
+        raw_text = msg.get("content") or msg.get("reasoning_content") or ""
+        return _parse_json_response(raw_text), page_map
 
     except Exception as e:
         st.error(f"Error during AI analysis: {str(e)}")
