@@ -508,7 +508,7 @@ Use 0 for any value not found. Return ONLY valid JSON, no markdown, no extra tex
 # ============================================================
 # SESSION STATE & DB INIT
 # ============================================================
-for key, default in [('logged_in', False), ('user', None), ('last_analysis', None)]:
+for key, default in [('logged_in', False), ('user', None), ('last_analysis', None), ('extracted_data', None)]:
     if key not in st.session_state:
         st.session_state[key] = default
 
@@ -584,25 +584,139 @@ else:
 
         if uploaded_file:
             if st.button("Run Analysis"):
+                # Clear any previous state so the edit form always shows fresh
+                st.session_state.last_analysis = None
+                st.session_state.extracted_data = None
                 with st.spinner("Reading table of contents and extracting financial data..."):
-                    data = extract_financial_data(uploaded_file)
-                    if data:
-                        score, rec, checklist, mos, intrinsic_v = calculate_graham_score(data)
-                        ticker_val = str(data.get('ticker', '') or '').strip()
-                        if ticker_val in ('0', 'N/A', 'NA', 'n/a'):
-                            ticker_val = ''
-                        company_val = data.get('company_name', '')
-                        save_analysis(user, company_val, ticker_val, data, score, rec)
-                        st.session_state.last_analysis = {
-                            'data': data, 'score': score, 'rec': rec,
-                            'checklist': checklist, 'mos': mos, 'intrinsic_v': intrinsic_v,
-                            'ticker': ticker_val, 'company': company_val,
-                        }
-                        if ticker_val:
-                            fired = check_and_fire_alerts(user, ticker_val, company_val, score, mos)
-                            for f in fired:
-                                st.success(f"📧 Alert fired: {f}")
+                    raw = extract_financial_data(uploaded_file)
+                    if raw:
+                        st.session_state.extracted_data = raw
 
+        # ── PHASE 2: EDIT FORM (shown after extraction, before saving) ──
+        if st.session_state.extracted_data and not st.session_state.last_analysis:
+            raw = st.session_state.extracted_data
+
+            def _clean_ticker(v):
+                s = str(v or '').strip()
+                return '' if s in ('0', 'N/A', 'NA', 'n/a', 'none', 'None') else s
+
+            def _flt(v):
+                try: return float(v or 0)
+                except: return 0.0
+
+            ticker_missing = _clean_ticker(raw.get('ticker')) == ''
+
+            st.markdown("---")
+            st.subheader("Review & Edit Extracted Data")
+            st.caption("AI extraction is not always perfect — check the values below before saving. "
+                       "Correct any zeros or wrong numbers, then click **Confirm & Score**.")
+
+            if ticker_missing:
+                st.error("⚠️ Ticker symbol was not found in the report. "
+                         "Please enter it manually — it is required to track this company's history.")
+
+            with st.form("edit_extracted_data"):
+                # ── Row 1: Company identity ──────────────────────────
+                c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
+                with c1:
+                    company_name = st.text_input("Company Name *",
+                                                 value=raw.get('company_name', ''))
+                with c2:
+                    ticker_default = _clean_ticker(raw.get('ticker'))
+                    ticker = st.text_input(
+                        "Ticker Symbol *" + ("  🔴 required" if ticker_missing else ""),
+                        value=ticker_default,
+                        placeholder="e.g. SAMP, AAPL",
+                        help="Used as the unique company ID in the database."
+                    )
+                with c3:
+                    fiscal_year = st.text_input("Fiscal Year", value=str(raw.get('fiscal_year', '')))
+                with c4:
+                    div_index = 0 if raw.get('dividend_paid') == 'Yes' else 1
+                    dividend_paid = st.selectbox("Dividend Paid", ["Yes", "No"], index=div_index)
+
+                st.markdown("##### Income & Returns")
+                c5, c6, c7, c8 = st.columns(4)
+                with c5:
+                    revenue = st.number_input("Revenue (Millions)", value=_flt(raw.get('revenue')),
+                                              min_value=0.0, format="%.2f")
+                with c6:
+                    net_income = st.number_input("Net Income (Millions)", value=_flt(raw.get('net_income')),
+                                                 format="%.2f")
+                with c7:
+                    eps = st.number_input("EPS", value=_flt(raw.get('eps')), format="%.4f")
+                with c8:
+                    roe = st.number_input("ROE (%)", value=_flt(raw.get('roe')), format="%.2f")
+
+                st.markdown("##### Valuation Ratios")
+                c9, c10, c11, c12 = st.columns(4)
+                with c9:
+                    pe_ratio = st.number_input("P/E Ratio", value=_flt(raw.get('pe_ratio')),
+                                               min_value=0.0, format="%.2f")
+                with c10:
+                    pb_ratio = st.number_input("P/B Ratio", value=_flt(raw.get('pb_ratio')),
+                                               min_value=0.0, format="%.2f")
+                with c11:
+                    debt_to_equity = st.number_input("Debt / Equity", value=_flt(raw.get('debt_to_equity')),
+                                                     min_value=0.0, format="%.4f")
+                with c12:
+                    earnings_growth = st.number_input("5yr Earnings Growth (%)",
+                                                      value=_flt(raw.get('earnings_growth_5yr')),
+                                                      format="%.2f")
+
+                st.markdown("##### Balance Sheet")
+                c13, c14, c15 = st.columns(3)
+                with c13:
+                    current_assets = st.number_input("Current Assets (Millions)",
+                                                     value=_flt(raw.get('current_assets')),
+                                                     min_value=0.0, format="%.2f")
+                with c14:
+                    current_liabilities = st.number_input("Current Liabilities (Millions)",
+                                                          value=_flt(raw.get('current_liabilities')),
+                                                          min_value=0.0, format="%.2f")
+                with c15:
+                    intrinsic_value_raw = st.number_input("Intrinsic Value (if stated, else 0)",
+                                                          value=_flt(raw.get('intrinsic_value')),
+                                                          min_value=0.0, format="%.2f")
+
+                submitted = st.form_submit_button("✅ Confirm & Score", use_container_width=True)
+
+            if submitted:
+                ticker_clean = ticker.strip().upper()
+                if not ticker_clean:
+                    st.error("Ticker symbol is required. Please enter it above and click Confirm again.")
+                else:
+                    edited_data = {
+                        'company_name': company_name,
+                        'ticker': ticker_clean,
+                        'fiscal_year': fiscal_year,
+                        'revenue': revenue,
+                        'net_income': net_income,
+                        'eps': eps,
+                        'roe': roe,
+                        'debt_to_equity': debt_to_equity,
+                        'pe_ratio': pe_ratio,
+                        'pb_ratio': pb_ratio,
+                        'earnings_growth_5yr': earnings_growth,
+                        'current_assets': current_assets,
+                        'current_liabilities': current_liabilities,
+                        'dividend_paid': dividend_paid,
+                        'intrinsic_value': intrinsic_value_raw,
+                    }
+                    score, rec, checklist, mos, intrinsic_v = calculate_graham_score(edited_data)
+                    save_analysis(user, company_name, ticker_clean, edited_data, score, rec)
+                    st.session_state.last_analysis = {
+                        'data': edited_data, 'score': score, 'rec': rec,
+                        'checklist': checklist, 'mos': mos, 'intrinsic_v': intrinsic_v,
+                        'ticker': ticker_clean, 'company': company_name,
+                    }
+                    st.session_state.extracted_data = None
+                    fired = check_and_fire_alerts(user, ticker_clean, company_name, score, mos)
+                    for f in fired:
+                        st.success(f"📧 Alert fired: {f}")
+                    st.rerun()
+
+        # ── PHASE 3: RESULTS (shown after Confirm & Score) ──────
         if st.session_state.last_analysis:
             la = st.session_state.last_analysis
             data, score, rec, checklist, mos, intrinsic_v = (
@@ -639,7 +753,7 @@ else:
                 for item in checklist:
                     st.write(item)
 
-            st.subheader("Extracted Financial Data")
+            st.subheader("Saved Financial Data")
             df_display = pd.DataFrame([data]).T.rename(columns={0: "Value"})
             st.dataframe(df_display, use_container_width=True)
 
