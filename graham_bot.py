@@ -443,6 +443,34 @@ _TOC_KEYWORDS = [
 ]
 
 
+_TOC_HEADING_RE = re.compile(
+    r'\b(table\s+of\s+contents?|contents?|index)\b',
+    re.IGNORECASE,
+)
+
+def _find_toc_page_indices(reader, max_scan=30):
+    """
+    Scan up to max_scan pages to find which ones carry a TOC heading.
+    Matches headings like: TABLE OF CONTENTS, CONTENTS, CONTENT, INDEX.
+    The matched line must be short (≤ 40 chars) so it's a title, not a sentence.
+    Returns a list of 0-based page indices (the heading page + up to 2 following
+    pages to capture multi-page TOCs).  Falls back to the first 10 pages if
+    no heading is found.
+    """
+    total = len(reader.pages)
+    found = []
+    for i in range(min(max_scan, total)):
+        text = reader.pages[i].extract_text() or ""
+        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        for line in lines[:20]:
+            if len(line) <= 40 and _TOC_HEADING_RE.search(line):
+                for j in range(i, min(i + 3, total)):
+                    if j not in found:
+                        found.append(j)
+                break
+    return sorted(found) if found else list(range(min(10, total)))
+
+
 def parse_toc_locally(toc_text):
     financial_keywords = [
         "income statement", "statement of profit or loss",
@@ -483,34 +511,39 @@ def _find_relevant_pages(reader, allow_gemini_toc=True):
     total_pages = len(reader.pages)
     page_map = {'method': None, 'total_pages': total_pages, 'sections': [], 'pages_sent': []}
 
-    st.info(f"📄 Report has {total_pages} pages. Reading table of contents...")
+    st.info(f"📄 Report has {total_pages} pages. Locating contents page...")
+    toc_indices = _find_toc_page_indices(reader)
+    toc_label = f"PDF page(s) {[i + 1 for i in toc_indices]}" if len(toc_indices) <= 5 else f"first {len(toc_indices)} pages"
+    st.info(f"📑 Contents section found at {toc_label}. Reading entries...")
+
     toc_text = ""
-    for i in range(min(10, total_pages)):
+    for i in toc_indices:
         toc_text += f"\n--- PDF Page {i + 1} ---\n{reader.pages[i].extract_text() or ''}\n"
 
     local_sections = parse_toc_locally(toc_text)
     if local_sections:
-        st.info(f"📋 TOC parsed locally — {len(local_sections)} sections found (no API call used).")
+        st.info(f"📋 Contents parsed locally — {len(local_sections)} financial sections found (no API call used).")
         toc_data = {"toc_found": True, "sections": local_sections}
     elif allow_gemini_toc:
         st.info("📋 Local parse inconclusive — using Gemini to read table of contents...")
         model = genai.GenerativeModel("gemini-2.0-flash")
-        toc_prompt = f"""Analyze this text from the first pages of an annual financial report.
-Find the Table of Contents and identify the printed page numbers for ALL financial statement sections.
+        toc_prompt = f"""Analyze this text extracted from an annual financial report's contents page.
+The contents page may be titled: TABLE OF CONTENTS, CONTENTS, CONTENT, or INDEX.
+Identify the printed page numbers for ALL financial statement sections listed in it.
 
-Look for ANY of these sections:
-- Income Statement / Statement of Profit or Loss and Other Comprehensive Income
-- Statement of Financial Position / Consolidated Balance Sheet
-- Statement of Changes in Equity (Group and Bank variants)
-- Statement of Cash Flows
-- Notes to Financial Statements / Accounting Policies
+Look for ANY of these sections (use the exact name from the document, not these labels):
+- Income Statement / Statement of Profit or Loss / Statement of Profit or Loss and Other Comprehensive Income
+- Statement of Financial Position / Balance Sheet / Consolidated Balance Sheet
+- Statement of Changes in Equity (including Group and Bank variants)
+- Statement of Cash Flows / Consolidated Statement of Cash Flows
+- Notes to Financial Statements / Accounting Policies / Significant Accounting Policies
 - Financial Highlights / Five-Year Summary / Ten-Year Summary / Key Financial Indicators
-- Per Share Data / Share Information / Investor Information / Capital Market Data
-- Financial Ratios / Key Performance Indicators / Segmental Information
+- Per Share Data / Share Information / Investor Information / Shareholders Information / Capital Market Data
+- Financial Ratios / Key Performance Indicators / KPIs / Segmental Information
 
 Return ONLY valid JSON (no markdown):
-{{"toc_found": true, "sections": [{{"name": "exact section name from TOC", "printed_page": 85}}]}}
-If no TOC found: {{"toc_found": false, "sections": []}}
+{{"toc_found": true, "sections": [{{"name": "exact section name from document", "printed_page": 85}}]}}
+If no contents page is present: {{"toc_found": false, "sections": []}}
 
 Document text:
 {toc_text[:12000]}"""
