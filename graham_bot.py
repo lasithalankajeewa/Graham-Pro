@@ -762,16 +762,32 @@ def extract_financial_data_openrouter(uploaded_file, model_id="openai/gpt-oss-12
                 {"role": "user", "content": _DATA_PROMPT + "\n\nDocument text:\n" + extracted_text[:60000]},
             ],
         }
-        resp = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=120,
+        import time
+        last_err = None
+        for attempt in range(3):
+            resp = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=120,
+            )
+            if resp.status_code == 429:
+                retry_after = int(resp.headers.get("Retry-After", 20))
+                wait = max(retry_after, 20) * (attempt + 1)
+                st.warning(f"⏳ Rate limit hit — waiting {wait}s before retry {attempt + 1}/3...")
+                time.sleep(wait)
+                last_err = resp
+                continue
+            resp.raise_for_status()
+            msg = resp.json()["choices"][0]["message"]
+            raw_text = msg.get("content") or msg.get("reasoning_content") or ""
+            return _parse_json_response(raw_text), page_map
+
+        st.error(
+            "❌ Rate limit: this free model has reached its request quota. "
+            "Please wait a minute and try again, or choose a different model from the dropdown."
         )
-        resp.raise_for_status()
-        msg = resp.json()["choices"][0]["message"]
-        raw_text = msg.get("content") or msg.get("reasoning_content") or ""
-        return _parse_json_response(raw_text), page_map
+        return None, None
 
     except Exception as e:
         st.error(f"Error during AI analysis: {str(e)}")
