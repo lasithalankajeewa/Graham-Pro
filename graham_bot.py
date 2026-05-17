@@ -18,6 +18,16 @@ from plotly.subplots import make_subplots
 from pypdf import PdfReader, PdfWriter
 
 # --- CONFIGURATION ---
+# On Streamlit Cloud secrets are stored in st.secrets, not in a .env file.
+# Copy them into os.environ so all os.getenv() calls below work unchanged,
+# both locally (where .env is used) and on Streamlit Cloud.
+try:
+    for _k, _v in st.secrets.items():
+        if _k not in os.environ:
+            os.environ[_k] = str(_v)
+except Exception:
+    pass  # st.secrets is empty locally — load_dotenv() handles it below
+
 load_dotenv()
 API_KEY = os.getenv("GEMINI_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///graham_bot.db")
