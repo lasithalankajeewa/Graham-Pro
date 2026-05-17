@@ -420,13 +420,22 @@ def extract_financial_data(uploaded_file):
             toc_text += f"\n--- PDF Page {i + 1} ---\n{reader.pages[i].extract_text() or ''}\n"
 
         toc_prompt = f"""Analyze this text from the first pages of an annual financial report.
-Find the Table of Contents and identify the printed page numbers for financial statement sections.
+Find the Table of Contents and identify the printed page numbers for ALL financial statement sections.
 
-Look for: Consolidated Balance Sheet, Income Statement / Statement of Operations,
-Cash Flow Statement, Notes to Financial Statements, Financial Highlights / Five-Year Summary.
+Look for ANY of these sections (use exact names from the TOC, not these labels):
+- Income Statement
+- Statement of Profit or Loss / Statement of Profit or Loss and Other Comprehensive Income
+- Statement of Financial Position / Consolidated Balance Sheet / Balance Sheet
+- Statement of Changes in Equity / Statement of Changes in Equity – Group / Statement of Changes in Equity – Bank
+- Statement of Cash Flows / Consolidated Statement of Cash Flows
+- Notes to Financial Statements / Accounting Policies / Significant Accounting Policies
+- Financial Highlights / Five-Year Summary / Ten-Year Summary / Key Financial Indicators
+- Per Share Data / Share Information / Investor Information / Shareholders Information / Capital Market Data
+- Financial Ratios / Key Performance Indicators / KPIs
+- Segmental Information / Segment Results
 
 Return ONLY valid JSON (no markdown):
-{{"toc_found": true, "sections": [{{"name": "section name", "printed_page": 85}}]}}
+{{"toc_found": true, "sections": [{{"name": "section name exactly as in TOC", "printed_page": 85}}]}}
 
 If no TOC found: {{"toc_found": false, "sections": []}}
 
@@ -466,10 +475,27 @@ Document text:
             page_map['method'] = 'keyword_scan'
             st.warning("⚠️ No Table of Contents detected — falling back to keyword scan.")
             keywords = [
-                "consolidated balance sheet", "statement of financial position",
-                "consolidated statement of income", "statement of operations",
-                "consolidated statement of cash flows", "financial highlights",
-                "five year summary", "five-year summary"
+                # Primary IFRS/SLFRS statement names (as seen in Sri Lankan reports)
+                "statement of financial position",
+                "statement of profit or loss and other comprehensive income",
+                "statement of profit or loss",
+                "statement of changes in equity",
+                "statement of cash flows",
+                "income statement",
+                # Consolidated variants
+                "consolidated balance sheet",
+                "consolidated statement of income",
+                "consolidated statement of operations",
+                "consolidated statement of cash flows",
+                "consolidated statement of changes in equity",
+                # Historical / ratio pages
+                "financial highlights",
+                "five year summary", "five-year summary",
+                "ten year summary", "ten-year summary",
+                "per share data", "share information",
+                "investor information", "shareholders information",
+                "capital market data", "financial ratios",
+                "key financial indicators", "key performance indicators",
             ]
             # Track first keyword match per page to avoid duplicates in page_map
             page_keyword: dict = {}
@@ -509,25 +535,43 @@ Document text:
             writer.write(f)
 
         myfile = genai.upload_file(cropped_pdf_path)
-        data_prompt = """Analyze this financial report excerpt and extract the metrics below.
-Use 0 for any value not found. Return ONLY valid JSON, no markdown, no extra text.
+        data_prompt = """Analyze this financial report and extract the metrics below.
+For each metric, search the ENTIRE document — check financial highlights tables, per share data pages,
+investor information sections, and balance sheets, not just the income statement.
+If a value is not stated directly, DERIVE it using the formula in the description.
+Only use 0 if the value genuinely cannot be found or calculated from any available data.
+Return ONLY valid JSON, no markdown, no extra text.
 
 {
-  "company_name": "string",
-  "ticker": "string",
-  "fiscal_year": "YYYY",
-  "revenue": number_in_millions,
-  "net_income": number_in_millions,
-  "eps": number,
-  "roe": percentage_as_number,
-  "debt_to_equity": ratio_number,
-  "pe_ratio": number,
-  "pb_ratio": number,
-  "earnings_growth_5yr": percentage_as_number,
-  "current_assets": number_in_millions,
-  "current_liabilities": number_in_millions,
-  "dividend_paid": "Yes or No",
-  "intrinsic_value": number_or_0
+  "company_name": "Full legal company name from cover or header",
+
+  "ticker": "Stock ticker/symbol. Check: cover page, investor information section, stock exchange listing page, or share data table. For Sri Lankan companies check CSE listing.",
+
+  "fiscal_year": "Financial year end year as YYYY",
+
+  "revenue": "For normal companies: total revenue/turnover in millions. For banks/financial institutions: Net Interest Income + Non-Interest Income (total operating income) in millions.",
+
+  "net_income": "Profit after tax / Net profit for the year in millions. Check income statement bottom line.",
+
+  "eps": "Earnings Per Share — find in: Per Share Data table, Financial Highlights, or Five/Ten-Year Summary. Also labelled 'Basic EPS' or 'Diluted EPS'.",
+
+  "roe": "Return on Equity as a percentage. Find in: Financial Ratios, Key Performance Indicators, or Financial Highlights table. If not stated, calculate as (Net Income / Average Shareholders Equity) x 100.",
+
+  "debt_to_equity": "Total Liabilities divided by Total Equity (Shareholders Funds) from the balance sheet. For banks this is typically 8-15. Calculate from balance sheet: Total Liabilities / Total Equity.",
+
+  "pe_ratio": "Price to Earnings ratio. Find in: Investor Information, Share Data, Capital Market Information, or Financial Highlights. Usually shown as 'P/E Ratio' or 'Price Earnings Ratio'. Use 0 only if completely absent.",
+
+  "pb_ratio": "Price to Book Value ratio. Find in: Investor Information, Share Data, or Financial Highlights. Also labelled 'Market Price to Book Value' or 'P/BV'. Use 0 only if completely absent.",
+
+  "earnings_growth_5yr": "5-year earnings growth as a percentage. Find in Five-Year or Ten-Year financial summary — calculate as: ((Latest EPS / EPS 5 years ago) ^ (1/5) - 1) x 100. If only 1 year available use 0.",
+
+  "current_assets": "For normal companies: current assets from balance sheet in millions. For banks: total assets due within 1 year, or total assets if not broken down by maturity (in millions).",
+
+  "current_liabilities": "For normal companies: current liabilities from balance sheet in millions. For banks: total liabilities due within 1 year, or total deposits + short-term borrowings if maturity breakdown unavailable (in millions).",
+
+  "dividend_paid": "'Yes' if any dividend was declared or paid this financial year, 'No' otherwise.",
+
+  "intrinsic_value": "Stated intrinsic or fair value per share if mentioned anywhere in the report, otherwise 0."
 }"""
         response = model.generate_content([data_prompt, myfile])
         raw_text = response.text.strip()
