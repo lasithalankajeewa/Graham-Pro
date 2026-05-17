@@ -393,12 +393,25 @@ def detect_page_offset(reader, max_scan=20):
     return 0
 
 def extract_financial_data(uploaded_file):
+    """Returns (data_dict, page_map) or (None, None) on failure.
+
+    page_map = {
+        'method':      'toc' | 'keyword_scan' | 'fallback',
+        'total_pages': int,
+        'sections':    [{'name', 'toc_page', 'pdf_pages'}, ...],
+        'pages_sent':  [int, ...],   # 1-based page numbers sent to Gemini
+    }
+    """
     if not API_KEY:
         st.error("Missing Gemini API Key. Please set GEMINI_API_KEY in .env")
-        return None
+        return None, None
+
+    page_map = {'method': None, 'total_pages': 0, 'sections': [], 'pages_sent': []}
+
     try:
         reader = PdfReader(uploaded_file)
         total_pages = len(reader.pages)
+        page_map['total_pages'] = total_pages
         model = genai.GenerativeModel("gemini-flash-latest")
 
         st.info(f"📄 Report has {total_pages} pages. Reading table of contents...")
@@ -429,18 +442,28 @@ Document text:
         toc_data = json.loads(toc_raw)
 
         relevant_pdf_indices = set()
+
         if toc_data.get("toc_found") and toc_data.get("sections"):
             offset = detect_page_offset(reader)
-            sections = toc_data["sections"]
-            st.success(f"✅ Table of Contents found — {len(sections)} financial sections identified.")
-            for sec in sections:
+            page_map['method'] = 'toc'
+            st.success(f"✅ Table of Contents found — {len(toc_data['sections'])} financial sections identified.")
+
+            for sec in toc_data["sections"]:
                 printed = sec.get("printed_page", 0)
                 if printed > 0:
                     pdf_idx = (printed - 1) + offset
+                    pages_for_sec = []
                     for j in range(pdf_idx, min(pdf_idx + 3, total_pages)):
                         if 0 <= j < total_pages:
                             relevant_pdf_indices.add(j)
+                            pages_for_sec.append(j + 1)  # store 1-based for display
+                    page_map['sections'].append({
+                        'name':      sec.get('name', ''),
+                        'toc_page':  printed,
+                        'pdf_pages': pages_for_sec,
+                    })
         else:
+            page_map['method'] = 'keyword_scan'
             st.warning("⚠️ No Table of Contents detected — falling back to keyword scan.")
             keywords = [
                 "consolidated balance sheet", "statement of financial position",
@@ -448,18 +471,34 @@ Document text:
                 "consolidated statement of cash flows", "financial highlights",
                 "five year summary", "five-year summary"
             ]
+            # Track first keyword match per page to avoid duplicates in page_map
+            page_keyword: dict = {}
             for i, page in enumerate(reader.pages):
                 text = (page.extract_text() or "").lower()
-                if any(k in text for k in keywords):
-                    relevant_pdf_indices.add(i)
-                    if i + 1 < total_pages:
-                        relevant_pdf_indices.add(i + 1)
+                for kw in keywords:
+                    if kw in text and i not in page_keyword:
+                        page_keyword[i] = kw
+                        relevant_pdf_indices.add(i)
+                        if i + 1 < total_pages:
+                            relevant_pdf_indices.add(i + 1)
+                        break
+            for pg_idx, kw in sorted(page_keyword.items()):
+                sent = [pg_idx + 1] + ([pg_idx + 2] if pg_idx + 1 < total_pages else [])
+                page_map['sections'].append({
+                    'name':      kw.title(),
+                    'toc_page':  None,
+                    'pdf_pages': sent,
+                })
 
         if not relevant_pdf_indices:
+            page_map['method'] = 'fallback'
             st.warning("⚠️ Could not identify financial pages — using first 15 pages.")
             relevant_pdf_indices = set(range(min(15, total_pages)))
+            page_map['sections'] = [{'name': 'Fallback — first 15 pages', 'toc_page': None,
+                                      'pdf_pages': list(range(1, min(16, total_pages + 1)))}]
 
         relevant_pages = sorted(list(relevant_pdf_indices))
+        page_map['pages_sent'] = [p + 1 for p in relevant_pages]  # 1-based
         st.info(f"🔍 Sending {len(relevant_pages)} targeted pages (out of {total_pages}) to Gemini.")
 
         writer = PdfWriter()
@@ -496,11 +535,11 @@ Use 0 for any value not found. Return ONLY valid JSON, no markdown, no extra tex
             raw_text = raw_text.split("```json")[1].split("```")[0].strip()
         elif "```" in raw_text:
             raw_text = raw_text.split("```")[1].split("```")[0].strip()
-        return json.loads(raw_text)
+        return json.loads(raw_text), page_map
 
     except Exception as e:
         st.error(f"Error during AI analysis: {str(e)}")
-        return None
+        return None, None
     finally:
         if os.path.exists("temp_report_cropped.pdf"):
             os.remove("temp_report_cropped.pdf")
@@ -508,7 +547,8 @@ Use 0 for any value not found. Return ONLY valid JSON, no markdown, no extra tex
 # ============================================================
 # SESSION STATE & DB INIT
 # ============================================================
-for key, default in [('logged_in', False), ('user', None), ('last_analysis', None), ('extracted_data', None)]:
+for key, default in [('logged_in', False), ('user', None), ('last_analysis', None),
+                     ('extracted_data', None), ('page_map', None)]:
     if key not in st.session_state:
         st.session_state[key] = default
 
@@ -545,6 +585,8 @@ with st.sidebar:
             st.session_state.logged_in = False
             st.session_state.user = None
             st.session_state.last_analysis = None
+            st.session_state.extracted_data = None
+            st.session_state.page_map = None
             st.rerun()
     st.markdown("---")
     st.info("Built on Benjamin Graham's 'The Intelligent Investor' principles.")
@@ -587,10 +629,12 @@ else:
                 # Clear any previous state so the edit form always shows fresh
                 st.session_state.last_analysis = None
                 st.session_state.extracted_data = None
+                st.session_state.page_map = None
                 with st.spinner("Reading table of contents and extracting financial data..."):
-                    raw = extract_financial_data(uploaded_file)
+                    raw, page_map = extract_financial_data(uploaded_file)
                     if raw:
                         st.session_state.extracted_data = raw
+                        st.session_state.page_map = page_map
 
         # ── PHASE 2: EDIT FORM (shown after extraction, before saving) ──
         if st.session_state.extracted_data and not st.session_state.last_analysis:
@@ -610,6 +654,42 @@ else:
             st.subheader("Review & Edit Extracted Data")
             st.caption("AI extraction is not always perfect — check the values below before saving. "
                        "Correct any zeros or wrong numbers, then click **Confirm & Score**.")
+
+            # ── Page map expander ────────────────────────────────
+            pm = st.session_state.get('page_map')
+            if pm:
+                method_label = {
+                    'toc':          '📋 Table of Contents',
+                    'keyword_scan': '🔍 Keyword Scan (no TOC found)',
+                    'fallback':     '⚠️ Fallback — first 15 pages',
+                }.get(pm['method'], pm['method'])
+
+                pages_sent_str = ', '.join(str(p) for p in pm['pages_sent'])
+                expander_title = (f"📄 Pages sent to Gemini — {len(pm['pages_sent'])} of "
+                                  f"{pm['total_pages']} total  |  Method: {method_label}")
+
+                with st.expander(expander_title, expanded=False):
+                    if pm['method'] == 'toc' and pm['sections']:
+                        rows = []
+                        for sec in pm['sections']:
+                            rows.append({
+                                'Section (from TOC)': sec['name'],
+                                'TOC Page': sec['toc_page'],
+                                'PDF Pages Read': ', '.join(str(p) for p in sec['pdf_pages']),
+                            })
+                        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                    elif pm['method'] == 'keyword_scan' and pm['sections']:
+                        rows = []
+                        for sec in pm['sections']:
+                            rows.append({
+                                'Matched Keyword': sec['name'],
+                                'PDF Pages Read': ', '.join(str(p) for p in sec['pdf_pages']),
+                            })
+                        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                    else:
+                        st.write(f"Pages: {pages_sent_str}")
+
+                    st.caption(f"All pages sent (1-based): {pages_sent_str}")
 
             if ticker_missing:
                 st.error("⚠️ Ticker symbol was not found in the report. "
