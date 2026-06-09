@@ -1,0 +1,33 @@
+name: Daily CSE Pipeline
+
+on:
+  schedule:
+    - cron: "30 14 * * *"   # 20:00 IST (UTC+5:30) every day
+  workflow_dispatch:          # manual trigger for testing
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run CSE pipeline
+        run: python -m pipeline.main
+        env:
+          DATABASE_URL:       ${{ secrets.DATABASE_URL }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          SMTP_HOST:          ${{ secrets.SMTP_HOST }}
+          SMTP_PORT:          ${{ secrets.SMTP_PORT }}
+          SMTP_USER:          ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD:      ${{ secrets.SMTP_PASSWORD }}
+          FROM_EMAIL:         ${{ secrets.FROM_EMAIL }}
+          PIPELINE_MODEL:     ${{ vars.PIPELINE_MODEL }}

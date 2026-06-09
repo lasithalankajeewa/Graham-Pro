@@ -78,637 +78,43 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- DB PATH ---
-def get_db_path():
-    if DATABASE_URL.startswith("sqlite:///"):
-        return DATABASE_URL.split("sqlite:///")[1]
-    return "graham_bot.db"
-
-DB_NAME = get_db_path()
-
 # ============================================================
-# SCORING — defined early because watchlist helpers use it
+# CORE IMPORTS  (pure Python — no Streamlit)
 # ============================================================
-def calculate_graham_score(data):
-    score = 0
-    checklist = []
-
-    pe = data.get('pe_ratio', 99)
-    if pe < 15:
-        score += 3; checklist.append("✅ P/E Ratio < 15 (+3)")
-    else:
-        checklist.append("❌ P/E Ratio >= 15")
-
-    pb = data.get('pb_ratio', 99)
-    if pb < 1.0:
-        score += 3; checklist.append("✅ P/B Ratio < 1.0 (+3)")
-    elif pb < 1.5:
-        score += 2; checklist.append("✅ P/B Ratio < 1.5 (+2)")
-    else:
-        checklist.append("❌ P/B Ratio >= 1.5")
-
-    growth = data.get('earnings_growth_5yr', 0)
-    if growth > 20:
-        score += 2; checklist.append("✅ High Growth > 20% (+2)")
-    elif growth > 0:
-        score += 1; checklist.append("✅ Positive Growth (+1)")
-    else:
-        checklist.append("❌ Negative/Zero Growth")
-
-    roe = data.get('roe', 0)
-    if roe > 15:
-        score += 2; checklist.append("✅ High ROE > 15% (+2)")
-    elif roe > 10:
-        score += 1; checklist.append("✅ Decent ROE > 10% (+1)")
-    else:
-        checklist.append("❌ Low ROE")
-
-    de = data.get('debt_to_equity', 99)
-    if de < 0.5:
-        score += 2; checklist.append("✅ Conservative Debt < 0.5 (+2)")
-    elif de < 1.0:
-        score += 1; checklist.append("✅ Manageable Debt < 1.0 (+1)")
-    else:
-        checklist.append("❌ High Debt/Equity")
-
-    liabilities = data.get('current_liabilities', 0)
-    current_ratio = data.get('current_assets', 0) / liabilities if liabilities > 0 else 0
-    if current_ratio > 2.0:
-        score += 1; checklist.append("✅ Strong Current Ratio > 2.0 (+1)")
-
-    if data.get('dividend_paid') == 'Yes':
-        score += 1; checklist.append("✅ Dividend Payer (+1)")
-
-    if data.get('revenue', 0) > 2000:
-        score += 1; checklist.append("✅ Large-Cap Size (+1)")
-
-    if score >= 12: rec = "Strong Buy"
-    elif score >= 9: rec = "Buy"
-    elif score >= 6: rec = "Hold"
-    else: rec = "Sell"
-
-    g = data.get('earnings_growth_5yr', 0)
-    v = data.get('eps', 0) * (8.5 + 2 * min(g, 15))
-    price = pe * data.get('eps', 1)
-    mos = ((v - price) / v * 100) if v > 0 else 0
-
-    return score, rec, checklist, mos, v
-
-# ============================================================
-# DATABASE
-# ============================================================
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (username TEXT PRIMARY KEY, password TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS analysis
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  username TEXT, company_name TEXT, ticker TEXT,
-                  date TEXT, data_json TEXT, score REAL, recommendation TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS watchlist
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  username TEXT, ticker TEXT, company_name TEXT, added_date TEXT,
-                  UNIQUE(username, ticker))''')
-    c.execute('''CREATE TABLE IF NOT EXISTS alerts
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  username TEXT, ticker TEXT, company_name TEXT,
-                  alert_type TEXT, threshold REAL, email TEXT,
-                  active INTEGER DEFAULT 1, last_triggered TEXT)''')
-    conn.commit()
-    conn.close()
-
-def hash_password(pw):
-    return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
-
-def check_password(pw, hashed):
-    return bcrypt.checkpw(pw.encode(), hashed.encode())
-
-def add_user(username, password):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    try:
-        c.execute("INSERT INTO users VALUES (?,?)", (username, hash_password(password)))
-        conn.commit(); return True
-    except sqlite3.IntegrityError:
-        return False
-    finally:
-        conn.close()
-
-def get_user(username):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE username=?", (username,))
-    user = c.fetchone(); conn.close(); return user
-
-def save_analysis(username, company, ticker, data, score, rec):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("INSERT INTO analysis (username, company_name, ticker, date, data_json, score, recommendation) VALUES (?,?,?,?,?,?,?)",
-              (username, company, ticker, datetime.now().strftime("%Y-%m-%d %H:%M"), json.dumps(data), score, rec))
-    conn.commit(); conn.close()
-
-def get_history(username, ticker=None):
-    conn = sqlite3.connect(DB_NAME)
-    query = "SELECT * FROM analysis WHERE username=?"
-    params = [username]
-    if ticker:
-        query += " AND ticker=?"; params.append(ticker)
-    df = pd.read_sql_query(query, conn, params=params)
-    conn.close(); return df
-
-def get_ticker_trend_data(username, ticker):
-    df = get_history(username, ticker)
-    if df.empty:
-        return pd.DataFrame()
-    rows = []
-    for _, row in df.iterrows():
-        try:
-            d = json.loads(row['data_json'])
-            rows.append({
-                'fiscal_year': str(d.get('fiscal_year', row['date'][:4])),
-                'revenue': float(d.get('revenue', 0) or 0),
-                'net_income': float(d.get('net_income', 0) or 0),
-                'eps': float(d.get('eps', 0) or 0),
-                'roe': float(d.get('roe', 0) or 0),
-                'score': float(row['score']),
-            })
-        except Exception:
-            continue
-    if not rows:
-        return pd.DataFrame()
-    return (pd.DataFrame(rows)
-            .sort_values('fiscal_year')
-            .drop_duplicates('fiscal_year')
-            .reset_index(drop=True))
-
-def calculate_cagr(values):
-    clean = [v for v in values if v is not None and v != 0]
-    if len(clean) < 2 or clean[0] <= 0:
-        return None
-    try:
-        return ((clean[-1] / clean[0]) ** (1 / (len(clean) - 1)) - 1) * 100
-    except Exception:
-        return None
-
-# --- Watchlist ---
-def add_to_watchlist(username, ticker, company_name):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    try:
-        c.execute("INSERT OR IGNORE INTO watchlist (username, ticker, company_name, added_date) VALUES (?,?,?,?)",
-                  (username, ticker.upper(), company_name, datetime.now().strftime("%Y-%m-%d")))
-        conn.commit(); return c.rowcount > 0
-    finally:
-        conn.close()
-
-def remove_from_watchlist(username, ticker):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("DELETE FROM watchlist WHERE username=? AND ticker=?", (username, ticker.upper()))
-    conn.commit(); conn.close()
-
-def is_on_watchlist(username, ticker):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT 1 FROM watchlist WHERE username=? AND ticker=?", (username, ticker.upper()))
-    result = c.fetchone() is not None; conn.close(); return result
-
-def get_watchlist_with_scores(username):
-    conn = sqlite3.connect(DB_NAME)
-    wl = pd.read_sql_query(
-        "SELECT ticker, company_name, added_date FROM watchlist WHERE username=?",
-        conn, params=(username,))
-    items = []
-    for _, row in wl.iterrows():
-        ticker = row['ticker']
-        analyses = pd.read_sql_query(
-            "SELECT score, recommendation, date, data_json FROM analysis "
-            "WHERE username=? AND ticker=? ORDER BY date DESC LIMIT 2",
-            conn, params=(username, ticker))
-        entry = {
-            'ticker': ticker, 'company_name': row['company_name'],
-            'added_date': row['added_date'], 'last_score': None,
-            'last_rec': None, 'last_mos': None,
-            'last_analyzed': None, 'score_change': None,
-        }
-        if not analyses.empty:
-            latest = analyses.iloc[0]
-            entry['last_score'] = int(latest['score'])
-            entry['last_rec'] = latest['recommendation']
-            entry['last_analyzed'] = latest['date']
-            try:
-                d = json.loads(latest['data_json'])
-                _, _, _, mos, _ = calculate_graham_score(d)
-                entry['last_mos'] = round(mos, 1)
-            except Exception:
-                pass
-            if len(analyses) >= 2:
-                entry['score_change'] = int(latest['score']) - int(analyses.iloc[1]['score'])
-        items.append(entry)
-    conn.close()
-    return items
-
-# --- Alerts ---
-def add_alert(username, ticker, company_name, alert_type, threshold, email):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("INSERT INTO alerts (username, ticker, company_name, alert_type, threshold, email, active) VALUES (?,?,?,?,?,?,1)",
-              (username, ticker.upper(), company_name, alert_type, threshold, email))
-    conn.commit(); conn.close()
-
-def get_alerts(username):
-    conn = sqlite3.connect(DB_NAME)
-    df = pd.read_sql_query("SELECT * FROM alerts WHERE username=? ORDER BY id DESC", conn, params=(username,))
-    conn.close(); return df
-
-def delete_alert(alert_id):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("DELETE FROM alerts WHERE id=?", (alert_id,))
-    conn.commit(); conn.close()
-
-def check_and_fire_alerts(username, ticker, company_name, current_score, current_mos):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT id, alert_type, threshold, email FROM alerts WHERE username=? AND ticker=? AND active=1",
-              (username, ticker.upper()))
-    alerts = c.fetchall(); conn.close()
-
-    fired = []
-    for alert_id, alert_type, threshold, email in alerts:
-        triggered = False
-        if alert_type == "score_above" and current_score >= threshold:
-            triggered = True
-            subject = f"Graham-Bot: {ticker} Score {current_score}/15 — At or Above {int(threshold)}"
-            body = f"{company_name} ({ticker}) Graham Score is {current_score}/15, at or above your threshold of {int(threshold)}."
-        elif alert_type == "score_below" and current_score < threshold:
-            triggered = True
-            subject = f"Graham-Bot: {ticker} Score {current_score}/15 — Below {int(threshold)}"
-            body = f"{company_name} ({ticker}) Graham Score dropped to {current_score}/15, below your threshold of {int(threshold)}."
-        elif alert_type == "mos_above" and current_mos >= threshold:
-            triggered = True
-            subject = f"Graham-Bot: {ticker} MOS {current_mos:.1f}% — At or Above {threshold}%"
-            body = f"{company_name} ({ticker}) Margin of Safety is {current_mos:.1f}%, at or above your threshold of {threshold}%."
-        elif alert_type == "mos_below" and current_mos < threshold:
-            triggered = True
-            subject = f"Graham-Bot: {ticker} MOS {current_mos:.1f}% — Below {threshold}%"
-            body = f"{company_name} ({ticker}) Margin of Safety dropped to {current_mos:.1f}%, below your threshold of {threshold}%."
-
-        if triggered:
-            ok, _ = send_alert_email(email, subject, body + "\n\n---\nGraham-Bot | For educational purposes only.")
-            if ok:
-                conn2 = sqlite3.connect(DB_NAME)
-                conn2.execute("UPDATE alerts SET last_triggered=? WHERE id=?",
-                              (datetime.now().strftime("%Y-%m-%d %H:%M"), alert_id))
-                conn2.commit(); conn2.close()
-                fired.append(f"{alert_type} → {email}")
-    return fired
-
-# --- Email ---
-def send_alert_email(to_email, subject, body):
-    if not SMTP_USER or not SMTP_PASSWORD:
-        return False, "SMTP not configured"
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = FROM_EMAIL
-        msg['To'] = to_email
-        msg['Subject'] = subject
-        msg.attach(MIMEText(body, 'plain'))
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
-            server.ehlo(); server.starttls()
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(FROM_EMAIL, to_email, msg.as_string())
-        return True, "Sent"
-    except Exception as e:
-        return False, str(e)
-
-def send_test_email(to_email):
-    return send_alert_email(
-        to_email,
-        "Graham-Bot — Test Email",
-        "Your Graham-Bot email alerts are configured correctly.\n\n---\nGraham-Bot | For educational purposes only."
-    )
-
-# ============================================================
-# AI DATA EXTRACTION
-# ============================================================
-def _parse_json_response(text):
-    """
-    Robustly extract a JSON object from a model response.
-    Handles: <think> blocks, markdown fences, leading/trailing prose,
-    trailing commas, and other common model quirks.
-    """
-    # Strip reasoning/thinking blocks (DeepSeek, o1-style models)
-    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-    text = re.sub(r'<reasoning>.*?</reasoning>', '', text, flags=re.DOTALL)
-    text = text.strip()
-
-    # Strip markdown code fences
-    if "```json" in text:
-        text = text.split("```json")[1].split("```")[0].strip()
-    elif "```" in text:
-        text = text.split("```")[1].split("```")[0].strip()
-
-    # Try direct parse
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    # Extract first { ... last } and try again
-    start = text.find('{')
-    end = text.rfind('}')
-    if start != -1 and end > start:
-        chunk = text[start:end + 1]
-        try:
-            return json.loads(chunk)
-        except json.JSONDecodeError:
-            # Remove trailing commas before ] or } and retry
-            chunk = re.sub(r',\s*([}\]])', r'\1', chunk)
-            return json.loads(chunk)
-
-    raise ValueError(f"No JSON object found in model response: {text[:200]}")
-
-
-def detect_page_offset(reader, max_scan=20):
-    for i in range(min(max_scan, len(reader.pages))):
-        text = reader.pages[i].extract_text() or ""
-        lines = [l.strip() for l in text.strip().split('\n') if l.strip()]
-        candidates = (lines[:3] + lines[-3:]) if len(lines) > 3 else lines
-        for line in candidates:
-            if line.isdigit():
-                n = int(line)
-                if 1 <= n <= 8:
-                    return i - (n - 1)
-    return 0
-
-# Shared extraction prompt used by both Gemini and OpenRouter
-_DATA_PROMPT = """Analyze this financial report and extract the metrics below.
-Search the ENTIRE document — check financial highlights, per share data, investor information,
-and balance sheets, not just the income statement.
-If a value is not stated directly, DERIVE it using the formula in the description.
-Only use 0 if the value genuinely cannot be found or calculated.
-Return ONLY valid JSON, no markdown, no extra text.
-
-{
-  "company_name": "Full legal company name from cover or header",
-  "ticker": "Stock ticker/symbol. Check: cover page, investor info, stock exchange listing, share data table. For Sri Lankan companies check CSE listing.",
-  "fiscal_year": "Financial year end year as YYYY",
-  "revenue": "For normal companies: total revenue/turnover in millions. For banks: Net Interest Income + Non-Interest Income (total operating income) in millions.",
-  "net_income": "Profit after tax / Net profit for the year in millions.",
-  "eps": "Earnings Per Share — find in Per Share Data table, Financial Highlights, or Five/Ten-Year Summary. Also labelled Basic EPS or Diluted EPS.",
-  "roe": "Return on Equity %. Find in Financial Ratios, KPIs, or Financial Highlights. If not stated, calculate as (Net Income / Average Shareholders Equity) x 100.",
-  "debt_to_equity": "Total Liabilities / Total Equity from the balance sheet. For banks this is typically 8-15. Calculate from balance sheet if not stated.",
-  "pe_ratio": "Price to Earnings ratio. Find in Investor Information, Share Data, Capital Market Information, or Financial Highlights. Use 0 only if completely absent.",
-  "pb_ratio": "Price to Book Value ratio. Find in Investor Information, Share Data, or Financial Highlights. Also labelled Market Price to Book Value or P/BV. Use 0 only if completely absent.",
-  "earnings_growth_5yr": "5-year earnings growth %. Find in Five/Ten-Year financial summary. Calculate as ((Latest EPS / EPS 5 years ago)^(1/5) - 1) x 100. Use 0 if only 1 year available.",
-  "current_assets": "For normal companies: current assets in millions. For banks: total assets due within 1 year, or total assets if not broken down by maturity.",
-  "current_liabilities": "For normal companies: current liabilities in millions. For banks: total liabilities due within 1 year, or total deposits + short-term borrowings.",
-  "dividend_paid": "Yes if any dividend was declared or paid this financial year, No otherwise.",
-  "intrinsic_value": "Stated intrinsic or fair value per share if mentioned, otherwise 0."
-}"""
-
-_TOC_KEYWORDS = [
-    "statement of financial position",
-    "statement of profit or loss and other comprehensive income",
-    "statement of profit or loss",
-    "statement of changes in equity",
-    "statement of cash flows",
-    "income statement",
-    "consolidated balance sheet",
-    "consolidated statement of income",
-    "consolidated statement of operations",
-    "consolidated statement of cash flows",
-    "consolidated statement of changes in equity",
-    "financial highlights",
-    "five year summary", "five-year summary",
-    "ten year summary", "ten-year summary",
-    "per share data", "share information",
-    "investor information", "shareholders information",
-    "capital market data", "financial ratios",
-    "key financial indicators", "key performance indicators",
-]
-
-
-_TOC_HEADING_RE = re.compile(
-    r'\b(table\s+of\s+contents?|contents?|index)\b',
-    re.IGNORECASE,
+from core.scoring import calculate_graham_score
+from core.email_utils import send_alert_email, send_test_email
+from core.db import (
+    init_db, hash_password, check_password,
+    add_user, get_user,
+    save_analysis, get_history, get_ticker_trend_data, calculate_cagr,
+    add_to_watchlist, remove_from_watchlist, is_on_watchlist, get_watchlist_with_scores,
+    add_alert, get_alerts, delete_alert,
+    check_and_fire_alerts,
+)
+from core.extraction import (
+    _parse_json_response, _find_relevant_pages,
+    detect_page_offset, _DATA_PROMPT, _TOC_KEYWORDS,
+    parse_toc_locally, parse_toc_loosely,
+    extract_with_openrouter as _extract_with_openrouter_headless,
 )
 
-def _find_toc_page_indices(reader, max_scan=30):
-    """
-    Scan up to max_scan pages to find which ones carry a TOC heading.
-    Matches headings like: TABLE OF CONTENTS, CONTENTS, CONTENT, INDEX.
-    The matched line must be short (≤ 40 chars) so it's a title, not a sentence.
-    Returns (indices, heading_found):
-      - indices: 0-based page list (heading page + up to 2 following pages)
-      - heading_found: True if a real heading was detected, False if using fallback
-    """
-    total = len(reader.pages)
-    found = []
-    for i in range(min(max_scan, total)):
-        text = reader.pages[i].extract_text() or ""
-        lines = [l.strip() for l in text.split('\n') if l.strip()]
-        for line in lines[:20]:
-            if len(line) <= 40 and _TOC_HEADING_RE.search(line):
-                for j in range(i, min(i + 3, total)):
-                    if j not in found:
-                        found.append(j)
-                break
-    if found:
-        return sorted(found), True
-    return list(range(min(10, total))), False
+# ============================================================
+# STREAMLIT WRAPPERS FOR EXTRACTION
+# (keep st.* feedback; delegate core logic to core.extraction)
+# ============================================================
 
-
-def parse_toc_locally(toc_text):
-    financial_keywords = [
-        "income statement", "statement of profit or loss",
-        "statement of financial position", "balance sheet",
-        "statement of cash flows", "cash flow",
-        "statement of changes in equity", "changes in equity",
-        "comprehensive income", "financial highlights",
-        "five year", "five-year", "ten year", "ten-year",
-        "per share data", "investor information",
-        "shareholders information", "financial ratios",
-        "key financial indicators", "key performance indicators",
-        "capital market", "segmental", "segment result",
-    ]
-    sections = []
-    for line in toc_text.split('\n'):
-        clean = line.strip()
-        if len(clean) < 5:
-            continue
-        m = (re.search(r'^(.+?)\s*\.{2,}\s*(\d{1,4})\s*$', clean) or
-             re.search(r'^(.+?)\s{4,}(\d{1,4})\s*$', clean) or
-             re.search(r'^(.+?)\s*[-–—|]\s*(\d{1,4})\s*$', clean))
-        if not m:
-            continue
-        name = m.group(1).strip().rstrip('.')
-        page = int(m.group(2))
-        if 1 <= page <= 2000 and any(kw in name.lower() for kw in financial_keywords):
-            if not any(s['printed_page'] == page for s in sections):
-                sections.append({'name': name, 'printed_page': page})
-    return sections if len(sections) >= 2 else []
-
-
-def parse_toc_loosely(toc_text):
-    """
-    Second-pass parser: no strict separator required.
-    Finds any line that contains a financial keyword AND at least one number.
-    Takes the last number on the line as the page number.
-    Used when parse_toc_locally finds < 2 entries but we know the TOC page exists.
-    """
-    financial_keywords = [
-        "income statement", "statement of profit or loss",
-        "statement of financial position", "balance sheet",
-        "statement of cash flows", "cash flow",
-        "statement of changes in equity", "changes in equity",
-        "comprehensive income", "financial highlights",
-        "five year", "five-year", "ten year", "ten-year",
-        "per share data", "investor information",
-        "shareholders information", "financial ratios",
-        "key financial indicators", "key performance indicators",
-        "capital market", "segmental", "segment result",
-    ]
-    sections = []
-    for line in toc_text.split('\n'):
-        clean = line.strip()
-        if len(clean) < 5:
-            continue
-        if not any(kw in clean.lower() for kw in financial_keywords):
-            continue
-        nums = re.findall(r'\b(\d{1,4})\b', clean)
-        if not nums:
-            continue
-        page = int(nums[-1])
-        if 1 <= page <= 2000:
-            name = re.sub(r'[\s\d]+$', '', clean).strip().rstrip('.-–—|')
-            if name and not any(s['printed_page'] == page for s in sections):
-                sections.append({'name': name, 'printed_page': page})
-    return sections if sections else []
-
-
-def _find_relevant_pages(reader, allow_gemini_toc=True):
-    """
-    Shared page-detection logic for both Gemini and OpenRouter.
-    Returns (page_map, sorted list of 0-based PDF indices).
-    allow_gemini_toc=False skips the Gemini TOC API call (used in OpenRouter mode).
-    """
-    total_pages = len(reader.pages)
-    page_map = {'method': None, 'total_pages': total_pages, 'sections': [], 'pages_sent': []}
-
-    # ── Step 1: locate the contents page ──────────────────────────────────
-    st.info(f"📄 Report has {total_pages} pages. Locating contents page...")
-    toc_indices, heading_found = _find_toc_page_indices(reader)
-
-    toc_text = ""
-    for i in toc_indices:
-        toc_text += f"\n--- PDF Page {i + 1} ---\n{reader.pages[i].extract_text() or ''}\n"
-
-    toc_data = {"toc_found": False, "sections": []}
-
-    if heading_found:
-        toc_label = f"PDF page(s) {[i + 1 for i in toc_indices]}"
-        st.info(f"📑 Contents page found at {toc_label}. Reading entries...")
-
-        # 1st attempt: strict local parse (requires separator like dots/spaces/dashes)
-        sections = parse_toc_locally(toc_text)
-        if sections:
-            st.info(f"📋 Parsed locally — {len(sections)} financial sections found (no API call).")
-            toc_data = {"toc_found": True, "sections": sections}
-        else:
-            # 2nd attempt: looser local parse (any line with keyword + number)
-            sections = parse_toc_loosely(toc_text)
-            if sections:
-                st.info(f"📋 Parsed (loose match) — {len(sections)} financial sections found (no API call).")
-                toc_data = {"toc_found": True, "sections": sections}
-            elif allow_gemini_toc:
-                # 3rd attempt: Gemini reads the contents page text
-                st.info("📋 Local parse inconclusive — using Gemini to read contents page...")
-                model = genai.GenerativeModel("gemini-2.0-flash")
-                toc_prompt = f"""Analyze this text extracted from an annual financial report's contents page.
-The contents page may be titled: TABLE OF CONTENTS, CONTENTS, CONTENT, or INDEX.
-Identify the printed page numbers for ALL financial statement sections listed in it.
-
-Look for ANY of these sections (use the exact name from the document, not these labels):
-- Income Statement / Statement of Profit or Loss / Statement of Profit or Loss and Other Comprehensive Income
-- Statement of Financial Position / Balance Sheet / Consolidated Balance Sheet
-- Statement of Changes in Equity (including Group and Bank variants)
-- Statement of Cash Flows / Consolidated Statement of Cash Flows
-- Notes to Financial Statements / Accounting Policies / Significant Accounting Policies
-- Financial Highlights / Five-Year Summary / Ten-Year Summary / Key Financial Indicators
-- Per Share Data / Share Information / Investor Information / Shareholders Information / Capital Market Data
-- Financial Ratios / Key Performance Indicators / KPIs / Segmental Information
-
-Return ONLY valid JSON (no markdown):
-{{"toc_found": true, "sections": [{{"name": "exact section name from document", "printed_page": 85}}]}}
-If no contents entries are readable: {{"toc_found": false, "sections": []}}
-
-Document text:
-{toc_text[:12000]}"""
-                toc_resp = model.generate_content(toc_prompt)
-                toc_data = _parse_json_response(toc_resp.text)
-            # If heading was found but all parsers failed: toc_data stays {toc_found: False}
-            # → falls through to the first-15-pages fallback below (NOT a keyword scan)
+def _st_notify(level, msg):
+    """Route core extraction log messages to Streamlit UI feedback."""
+    icons = {'info': 'ℹ️', 'warning': '⚠️', 'success': '✅', 'error': '❌'}
+    icon = icons.get(level, '')
+    if level == 'success':
+        st.success(f"{icon} {msg}")
+    elif level == 'warning':
+        st.warning(f"{icon} {msg}")
+    elif level == 'error':
+        st.error(f"{icon} {msg}")
     else:
-        # No contents heading detected anywhere → keyword scan the whole PDF
-        st.warning("⚠️ No contents page found — scanning all pages for financial statement keywords.")
-        page_map['method'] = 'keyword_scan'
-        relevant_pdf_indices = set()
-        page_keyword: dict = {}
-        for i, page in enumerate(reader.pages):
-            text = (page.extract_text() or "").lower()
-            for kw in _TOC_KEYWORDS:
-                if kw in text and i not in page_keyword:
-                    page_keyword[i] = kw
-                    relevant_pdf_indices.add(i)
-                    if i + 1 < total_pages:
-                        relevant_pdf_indices.add(i + 1)
-                    break
-        for pg_idx, kw in sorted(page_keyword.items()):
-            sent = [pg_idx + 1] + ([pg_idx + 2] if pg_idx + 1 < total_pages else [])
-            page_map['sections'].append({'name': kw.title(), 'toc_page': None, 'pdf_pages': sent})
-        relevant_pages = sorted(list(relevant_pdf_indices))
-        if not relevant_pages:
-            page_map['method'] = 'fallback'
-            st.warning("⚠️ No financial pages found — using first 15 pages.")
-            relevant_pages = list(range(min(15, total_pages)))
-            page_map['sections'] = [{'name': 'Fallback — first 15 pages', 'toc_page': None,
-                                      'pdf_pages': list(range(1, min(16, total_pages + 1)))}]
-        page_map['pages_sent'] = [p + 1 for p in relevant_pages]
-        return page_map, relevant_pages
-
-    # ── Step 2: map TOC section page numbers to PDF indices ────────────────
-    relevant_pdf_indices = set()
-
-    if toc_data.get("toc_found") and toc_data.get("sections"):
-        offset = detect_page_offset(reader)
-        page_map['method'] = 'toc'
-        st.success(f"✅ Contents page — {len(toc_data['sections'])} financial sections identified.")
-        for sec in toc_data["sections"]:
-            printed = sec.get("printed_page", 0)
-            if printed > 0:
-                pdf_idx = (printed - 1) + offset
-                pages_for_sec = []
-                for j in range(pdf_idx, min(pdf_idx + 3, total_pages)):
-                    if 0 <= j < total_pages:
-                        relevant_pdf_indices.add(j)
-                        pages_for_sec.append(j + 1)
-                page_map['sections'].append({
-                    'name': sec.get('name', ''), 'toc_page': printed, 'pdf_pages': pages_for_sec,
-                })
-
-    if not relevant_pdf_indices:
-        page_map['method'] = 'fallback'
-        st.warning("⚠️ Contents page found but entries could not be read — using first 15 pages.")
-        relevant_pdf_indices = set(range(min(15, total_pages)))
-        page_map['sections'] = [{'name': 'Fallback — first 15 pages', 'toc_page': None,
-                                  'pdf_pages': list(range(1, min(16, total_pages + 1)))}]
-
-    relevant_pages = sorted(list(relevant_pdf_indices))
-    page_map['pages_sent'] = [p + 1 for p in relevant_pages]
-    return page_map, relevant_pages
+        st.info(f"{icon} {msg}")
 
 
 def extract_financial_data(uploaded_file):
@@ -719,7 +125,9 @@ def extract_financial_data(uploaded_file):
 
     try:
         reader = PdfReader(uploaded_file)
-        page_map, relevant_pages = _find_relevant_pages(reader, allow_gemini_toc=True)
+        page_map, relevant_pages = _find_relevant_pages(
+            reader, allow_gemini_toc=True, notify_fn=_st_notify
+        )
         total_pages = page_map['total_pages']
 
         st.info(f"🔍 Uploading {len(relevant_pages)} of {total_pages} targeted pages to Gemini...")
@@ -744,64 +152,36 @@ def extract_financial_data(uploaded_file):
         if os.path.exists("temp_report_cropped.pdf"):
             os.remove("temp_report_cropped.pdf")
 
+
 def extract_financial_data_openrouter(uploaded_file, model_id="openai/gpt-oss-120b:free"):
-    """OpenRouter path — extracts PDF text locally, sends as a text prompt."""
+    """OpenRouter path — saves upload to a temp file, delegates to headless core."""
     openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
     if not openrouter_key:
         st.error("Missing OpenRouter API Key. Please set OPENROUTER_API_KEY in .env")
         return None, None
 
+    tmp_path = "temp_openrouter_upload.pdf"
     try:
-        reader = PdfReader(uploaded_file)
-        page_map, relevant_pages = _find_relevant_pages(reader, allow_gemini_toc=False)
-        total_pages = page_map['total_pages']
+        with open(tmp_path, "wb") as f:
+            f.write(uploaded_file.read())
+        uploaded_file.seek(0)
 
-        st.info(f"🔍 Extracting text from {len(relevant_pages)} of {total_pages} targeted pages...")
+        with st.spinner("Reading contents page and extracting text..."):
+            raw, page_map = _extract_with_openrouter_headless(tmp_path, model_id, openrouter_key)
 
-        extracted_text = ""
-        for p_idx in relevant_pages:
-            extracted_text += f"\n--- Page {p_idx + 1} ---\n{reader.pages[p_idx].extract_text() or ''}\n"
-
-        headers = {
-            "Authorization": f"Bearer {openrouter_key}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": model_id,
-            "messages": [
-                {"role": "user", "content": _DATA_PROMPT + "\n\nDocument text:\n" + extracted_text[:60000]},
-            ],
-        }
-        import time
-        last_err = None
-        for attempt in range(3):
-            resp = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=120,
+        if raw is None:
+            st.error(
+                "❌ Extraction failed. If this was a rate limit, wait a minute and try again "
+                "or choose a different model."
             )
-            if resp.status_code == 429:
-                retry_after = int(resp.headers.get("Retry-After", 20))
-                wait = max(retry_after, 20) * (attempt + 1)
-                st.warning(f"⏳ Rate limit hit — waiting {wait}s before retry {attempt + 1}/3...")
-                time.sleep(wait)
-                last_err = resp
-                continue
-            resp.raise_for_status()
-            msg = resp.json()["choices"][0]["message"]
-            raw_text = msg.get("content") or msg.get("reasoning_content") or ""
-            return _parse_json_response(raw_text), page_map
-
-        st.error(
-            "❌ Rate limit: this free model has reached its request quota. "
-            "Please wait a minute and try again, or choose a different model from the dropdown."
-        )
-        return None, None
+        return raw, page_map
 
     except Exception as e:
         st.error(f"Error during AI analysis: {str(e)}")
         return None, None
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 # ============================================================

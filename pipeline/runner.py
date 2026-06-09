@@ -1,0 +1,139 @@
+"""
+Pipeline orchestrator.
+For each new CSE financial report:
+  1. Check deduplication
+  2. Download PDF
+  3. Extract financials via OpenRouter
+  4. Score and save to DB
+  5. Fire email alerts for any matching user rules
+"""
+import logging
+import os
+import tempfile
+
+from core.db import (
+    is_report_processed,
+    mark_report_processed,
+    save_analysis,
+    check_and_fire_alerts_for_ticker,
+)
+from core.extraction import extract_with_openrouter
+from core.scoring import calculate_graham_score
+from pipeline.cse_fetcher import (
+    download_pdf,
+    fetch_announcements,
+    filter_reports,
+    get_pdf_url,
+    get_report_metadata,
+)
+
+log = logging.getLogger(__name__)
+
+PIPELINE_USER = "_pipeline_"
+
+
+def run_pipeline(
+    model_id: str,
+    openrouter_key: str,
+    tmp_dir: str | None = None,
+    max_reports: int | None = None,
+) -> dict:
+    """
+    Run a full pipeline cycle. Returns summary counts.
+    max_reports: cap for testing (None = no cap).
+    """
+    stats = {"processed": 0, "skipped": 0, "failed": 0, "alerts_fired": 0}
+
+    announcements = fetch_announcements()
+    reports = filter_reports(announcements)
+
+    if max_reports:
+        reports = reports[:max_reports]
+
+    log.info("Starting pipeline: %d reports to evaluate", len(reports))
+
+    work_dir = tmp_dir or tempfile.mkdtemp(prefix="graham_pipeline_")
+
+    for i, item in enumerate(reports, 1):
+        pdf_url = get_pdf_url(item)
+        meta = get_report_metadata(item)
+        ticker = meta["ticker"]
+        company = meta["company_name"]
+        report_type = meta["report_type"]
+        fiscal_year = meta["fiscal_year"]
+
+        log.info("[%d/%d] %s — %s (%s %s)", i, len(reports), ticker, company, report_type, fiscal_year)
+
+        if is_report_processed(pdf_url):
+            log.info("  → already processed, skipping")
+            stats["skipped"] += 1
+            continue
+
+        pdf_path = os.path.join(work_dir, f"{ticker}_{i}.pdf")
+        try:
+            ok = download_pdf(pdf_url, pdf_path)
+            if not ok:
+                log.warning("  → download failed, skipping")
+                stats["failed"] += 1
+                continue
+
+            raw, page_map = extract_with_openrouter(pdf_path, model_id, openrouter_key)
+            if raw is None:
+                log.warning("  → extraction returned None, skipping")
+                stats["failed"] += 1
+                continue
+
+            # Use ticker from the API if the model found a different one (API is authoritative)
+            if not raw.get("ticker"):
+                raw["ticker"] = ticker
+            if not raw.get("company_name"):
+                raw["company_name"] = company
+            if not raw.get("fiscal_year"):
+                raw["fiscal_year"] = fiscal_year
+
+            score, rec, _, mos, _ = calculate_graham_score(raw)
+
+            analysis_id = save_analysis(
+                username=PIPELINE_USER,
+                company=raw.get("company_name", company),
+                ticker=raw.get("ticker", ticker).upper(),
+                data=raw,
+                score=score,
+                rec=rec,
+                source="auto",
+            )
+
+            mark_report_processed(
+                ticker=raw.get("ticker", ticker).upper(),
+                company_name=raw.get("company_name", company),
+                report_type=report_type,
+                fiscal_year=str(raw.get("fiscal_year", fiscal_year)),
+                pdf_url=pdf_url,
+                analysis_id=analysis_id,
+            )
+
+            fired = check_and_fire_alerts_for_ticker(
+                ticker=raw.get("ticker", ticker).upper(),
+                company_name=raw.get("company_name", company),
+                current_score=score,
+                current_mos=mos,
+            )
+            stats["alerts_fired"] += len(fired)
+            if fired:
+                log.info("  → %d alert(s) fired: %s", len(fired), fired)
+
+            log.info("  → score=%d rec=%s mos=%.1f%% analysis_id=%s", score, rec, mos, analysis_id)
+            stats["processed"] += 1
+
+        except Exception as e:
+            log.error("  → unexpected error for %s: %s", pdf_url, e, exc_info=True)
+            stats["failed"] += 1
+        finally:
+            if os.path.exists(pdf_path):
+                os.remove(pdf_path)
+
+    log.info(
+        "Pipeline complete — processed=%d skipped=%d failed=%d alerts=%d",
+        stats["processed"], stats["skipped"], stats["failed"], stats["alerts_fired"],
+    )
+    return stats
