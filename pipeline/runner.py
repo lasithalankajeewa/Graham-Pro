@@ -83,11 +83,10 @@ def run_pipeline(
                 stats["failed"] += 1
                 continue
 
-            # Use ticker from the API if the model found a different one (API is authoritative)
-            if not raw.get("ticker"):
-                raw["ticker"] = ticker
-            if not raw.get("company_name"):
-                raw["company_name"] = company
+            # CSE API symbol/name are authoritative — always override model extraction.
+            # The model sometimes returns wrong tickers, placeholders, or empty strings.
+            raw["ticker"] = ticker  # always use CSE symbol
+            raw["company_name"] = company  # always use CSE registered name
             if not raw.get("fiscal_year"):
                 raw["fiscal_year"] = fiscal_year
 
@@ -95,8 +94,8 @@ def run_pipeline(
 
             analysis_id = save_analysis(
                 username=PIPELINE_USER,
-                company=raw.get("company_name", company),
-                ticker=raw.get("ticker", ticker).upper(),
+                company=company,
+                ticker=ticker,
                 data=raw,
                 score=score,
                 rec=rec,
