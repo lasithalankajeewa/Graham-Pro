@@ -654,7 +654,7 @@ else:
     # ── TAB 2: 5-YEAR TRENDS ──────────────────────────────────
     with tabs[1]:
         st.subheader("5-Year Financial Trends")
-        history_df = get_history(user)
+        history_df = get_history(user, include_auto=True)
         if history_df.empty:
             st.info("No analysis history yet. Upload reports to start tracking trends.")
         else:
@@ -783,14 +783,14 @@ else:
         st.subheader("Price & Score Alerts")
 
         with st.expander("➕ Add New Alert", expanded=True):
-            all_tickers_df = get_history(user)
+            all_tickers_df = get_history(user, include_auto=True)
             ticker_choices = sorted(all_tickers_df['ticker'].unique().tolist()) if not all_tickers_df.empty else []
 
             col_a, col_b = st.columns(2)
             with col_a:
                 if ticker_choices:
                     alert_ticker = st.selectbox("Company (Ticker)", ticker_choices, key="alert_ticker_sel")
-                    h = get_history(user, alert_ticker)
+                    h = get_history(user, alert_ticker, include_auto=True)
                     alert_company = h['company_name'].iloc[-1] if not h.empty else alert_ticker
                 else:
                     alert_ticker = st.text_input("Ticker Symbol", key="alert_ticker_txt").upper()
@@ -857,14 +857,25 @@ else:
     # ── TAB 5: HISTORY ────────────────────────────────────────
     with tabs[4]:
         st.subheader("Analysis Logs")
-        history_df = get_history(user)
+        show_auto = st.checkbox("Include auto-analyzed reports (pipeline)", value=True, key="hist_show_auto")
+        history_df = get_history(user, include_auto=show_auto)
         if not history_df.empty:
-            st.dataframe(
-                history_df[['date', 'company_name', 'ticker', 'score', 'recommendation']],
-                use_container_width=True, hide_index=True
+            display_df = history_df[['date', 'company_name', 'ticker', 'score', 'recommendation', 'source']].copy()
+            display_df['source'] = display_df['source'].fillna('manual').replace(
+                {'manual': 'Manual', 'auto': 'Auto'}
             )
+            st.dataframe(
+                display_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "source": st.column_config.TextColumn("Source"),
+                    "score": st.column_config.NumberColumn("Score", format="%d/15"),
+                }
+            )
+            st.caption(f"{len(history_df)} records — {(history_df['source'] == 'auto').sum()} auto-analyzed")
         else:
-            st.info("Your history will appear here once you've analyzed some reports.")
+            st.info("No analysis records found.")
 
 # --- FOOTER ---
 st.markdown("---")
