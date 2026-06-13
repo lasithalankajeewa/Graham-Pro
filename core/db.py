@@ -177,16 +177,17 @@ def update_analysis_market_price(analysis_id: int, market_price: float):
     """Patch market_price into data_json and recompute score/recommendation."""
     from core.scoring import calculate_full_analysis
     with _conn() as (con, ph):
-        row = con.execute(
-            _sql("SELECT data_json FROM analysis WHERE id=?", ph), (analysis_id,)
-        ).fetchone()
+        cur = con.cursor()
+        cur.execute(_sql("SELECT data_json FROM analysis WHERE id=?", ph), (analysis_id,))
+        row = cur.fetchone()
         if not row:
             return False
-        data = json.loads(row[0] if isinstance(row, (list, tuple)) else row['data_json'])
+        raw_json = row[0] if isinstance(row, (list, tuple)) else row['data_json']
+        data = json.loads(raw_json)
         data['market_price'] = market_price
         analysis = calculate_full_analysis(data)
         data['_analysis'] = analysis
-        con.execute(
+        cur.execute(
             _sql("UPDATE analysis SET data_json=?, score=?, recommendation=? WHERE id=?", ph),
             (json.dumps(data), analysis['graham_score'], analysis['recommendation'], analysis_id),
         )
