@@ -32,7 +32,7 @@ def main():
         sys.exit(1)
 
     # model used for ALL pipeline analyses
-    model_id = os.getenv("PIPELINE_MODEL", "openai/gpt-oss-120b:free")
+    model_id = os.getenv("PIPELINE_MODEL") or "openai/gpt-oss-120b:free"
 
     log.info("Initializing database schema...")
     from core.db import init_db
