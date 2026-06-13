@@ -257,6 +257,116 @@ if not st.session_state.logged_in:
 else:
     user = st.session_state.user
     st.title("📈 Market Analysis Dashboard")
+
+    # ── Reusable full analysis renderer (used by Analyze tab + History tab) ──
+    def _render_analysis_report(a, ticker_val, company_val, key_prefix=""):
+        def _na(v, fmt=".1f", suffix=""):
+            if v is None: return "N/A"
+            return f"{v:{fmt}}{suffix}"
+
+        grade = a['graham_grade']
+        score = a['graham_score']
+        rec   = a['recommendation']
+        grade_colors = {"A": "#1e7e34", "B": "#28a745", "C": "#ffc107", "D": "#dc3545"}
+        grade_color  = grade_colors.get(grade, "#6c757d")
+        st.markdown(
+            f"""<div style="background:{grade_color};color:{'black' if grade=='C' else 'white'};
+            padding:18px 24px;border-radius:12px;margin-bottom:16px;">
+            <span style="font-size:2em;font-weight:bold">Grade {grade}</span>
+            &nbsp;&nbsp;
+            <span style="font-size:1.3em">{company_val} ({ticker_val})</span>
+            &nbsp;&nbsp;|&nbsp;&nbsp;
+            <span style="font-size:1.2em">Score: {score}/15</span>
+            &nbsp;&nbsp;|&nbsp;&nbsp;
+            <span style="font-size:1.2em">{rec}</span>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
+        if ticker_val:
+            on_wl = is_on_watchlist(user, ticker_val)
+            wl_label = "★ Remove from Watchlist" if on_wl else "☆ Add to Watchlist"
+            if st.button(wl_label, key=f"{key_prefix}wl_btn"):
+                if on_wl:
+                    remove_from_watchlist(user, ticker_val)
+                else:
+                    add_to_watchlist(user, ticker_val, company_val)
+                st.rerun()
+
+        st.markdown("#### 1. Growth Rates")
+        g1, g2, g3 = st.columns(3)
+        with g1:
+            rv = a['revenue_growth_pct']
+            st.metric("Revenue Growth", _na(rv, ".1f", "%"), delta=f"{rv:+.1f}%" if rv is not None else None)
+        with g2:
+            pg = a['profit_growth_pct']
+            st.metric("Profit Growth", _na(pg, ".1f", "%"), delta=f"{pg:+.1f}%" if pg is not None else None)
+        with g3:
+            eg = a['eps_growth_pct']
+            st.metric("EPS Growth", _na(eg, ".1f", "%"), delta=f"{eg:+.1f}%" if eg is not None else None)
+
+        st.markdown("#### 2 & 3. Valuation & Profitability Ratios")
+        v1, v2, v3, v4, v5, v6, v7 = st.columns(7)
+        with v1: st.metric("P/E Ratio",     _na(a['pe'], ".1f"))
+        with v2: st.metric("P/B Ratio",     _na(a['pb'], ".2f"))
+        with v3: st.metric("P/CF Ratio",    _na(a['pcf'], ".1f"))
+        with v4: st.metric("ROE",           _na(a['roe'], ".1f", "%"))
+        with v5: st.metric("ROA",           _na(a['roa'], ".1f", "%"))
+        with v6: st.metric("Current Ratio", _na(a['current_ratio'], ".2f"))
+        with v7: st.metric("Debt/Equity",   _na(a['de'], ".2f"))
+
+        st.markdown("#### 4. Dividend Metrics")
+        d1, d2 = st.columns(2)
+        with d1: st.metric("Dividend Yield", _na(a['div_yield'], ".1f", "%"))
+        with d2: st.metric("Payout Ratio",   _na(a['payout_ratio'], ".1f", "%"))
+
+        st.markdown("#### 5. Graham Score Table (max 15 pts)")
+        score_df = pd.DataFrame(a['score_table'])[["Criterion", "Value", "Points", "Score"]]
+        st.dataframe(
+            score_df, use_container_width=True, hide_index=True,
+            column_config={"Score": st.column_config.ProgressColumn("Score", max_value=3, format="%d")},
+        )
+        st.markdown(f"**Total: {score}/15 — Grade {grade}**")
+
+        st.markdown("#### 6. Margin of Safety (Sri Lanka Formula)")
+        m1, m2, m3, m4 = st.columns(4)
+        with m1: st.metric("Intrinsic Value (LKR)", f"{a['intrinsic_value']:.2f}", help="EPS × 7.4  (g=5%, Y=11%)")
+        with m2: st.metric("Market Price (LKR)",    f"{a['market_price']:.2f}" if a['market_price'] > 0 else "N/A")
+        with m3: st.metric("Margin of Safety",      f"{a['mos_pct']:.1f}%")
+        with m4: st.metric("Max Buy Price (30% MOS)", f"{a['max_buy_price']:.2f}")
+        st.info(f"MOS Grade: **{a['mos_grade']}**")
+
+        st.markdown("#### 7. Defensive Investor Checklist")
+        def_df = pd.DataFrame(a['defensive_checklist'])[["Criterion", "Condition", "Result"]]
+        st.dataframe(def_df, use_container_width=True, hide_index=True)
+        passes = a['defensive_passes']
+        st.markdown(
+            f"**{passes}/5 criteria met — {a['defensive_verdict']}** "
+            f"({'Passes' if passes >= 4 else 'Fails'} Defensive Investor test)"
+        )
+
+        st.markdown("#### 8. Final Recommendation")
+        buy = a['buy_decision']
+        buy_color      = "#1e7e34" if "YES" in buy else ("#ffc107" if "HOLD" in buy else "#dc3545")
+        buy_text_color = "black" if "HOLD" in buy else "white"
+        alloc_lkr = a['allocation_pct'] / 100 * 50000
+        st.markdown(
+            f"""<div style="background:{buy_color};color:{buy_text_color};
+            padding:16px;border-radius:10px;margin-bottom:12px;">
+            <b style="font-size:1.3em">{buy}</b><br>
+            Graham Grade: <b>{grade}</b> &nbsp;|&nbsp;
+            Max Buy Price: <b>LKR {a['max_buy_price']:.2f}</b> &nbsp;|&nbsp;
+            Allocation: <b>{a['allocation_pct']}% of LKR 50,000 = LKR {alloc_lkr:,.0f}</b>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("#### 9. Bottom Line")
+        st.info(a['bottom_line'])
+
+        with st.expander("Raw extracted data (JSON)", expanded=False):
+            st.json(a)
+
     tabs = st.tabs(["Analyze New Report", "5-Year Trends", "Watchlist", "Alerts", "Analysis History"])
 
     # ── TAB 1: ANALYZE ────────────────────────────────────────
@@ -517,139 +627,9 @@ else:
             la = st.session_state.last_analysis
             ticker_val  = la['ticker']
             company_val = la['company']
-            # Support both new-style (with 'full' key) and legacy session state
-            if 'full' in la:
-                a = la['full']
-            else:
-                a = calculate_full_analysis(la.get('data', {}))
-
-            def _na(v, fmt=".1f", suffix=""):
-                if v is None: return "N/A"
-                return f"{v:{fmt}}{suffix}"
-
+            a = la['full'] if 'full' in la else calculate_full_analysis(la.get('data', {}))
             st.markdown("---")
-
-            # ── Header banner ─────────────────────────────────────────────
-            grade = a['graham_grade']
-            score = a['graham_score']
-            rec   = a['recommendation']
-            grade_colors = {"A": "#1e7e34", "B": "#28a745", "C": "#ffc107", "D": "#dc3545"}
-            grade_color  = grade_colors.get(grade, "#6c757d")
-            st.markdown(
-                f"""<div style="background:{grade_color};color:{'black' if grade=='C' else 'white'};
-                padding:18px 24px;border-radius:12px;margin-bottom:16px;">
-                <span style="font-size:2em;font-weight:bold">Grade {grade}</span>
-                &nbsp;&nbsp;
-                <span style="font-size:1.3em">{company_val} ({ticker_val})</span>
-                &nbsp;&nbsp;|&nbsp;&nbsp;
-                <span style="font-size:1.2em">Score: {score}/15</span>
-                &nbsp;&nbsp;|&nbsp;&nbsp;
-                <span style="font-size:1.2em">{rec}</span>
-                </div>""",
-                unsafe_allow_html=True,
-            )
-
-            # ── Watchlist button ──────────────────────────────────────────
-            if ticker_val:
-                on_wl = is_on_watchlist(user, ticker_val)
-                wl_label = "★ Remove from Watchlist" if on_wl else "☆ Add to Watchlist"
-                if st.button(wl_label, key="wl_btn_phase3"):
-                    if on_wl:
-                        remove_from_watchlist(user, ticker_val)
-                    else:
-                        add_to_watchlist(user, ticker_val, company_val)
-                    st.rerun()
-
-            # ── Section 1: Growth Rates ───────────────────────────────────
-            st.markdown("#### 1. Growth Rates")
-            g1, g2, g3 = st.columns(3)
-            with g1:
-                rv = a['revenue_growth_pct']
-                st.metric("Revenue Growth", _na(rv, ".1f", "%"),
-                          delta=f"{rv:+.1f}%" if rv is not None else None)
-            with g2:
-                pg = a['profit_growth_pct']
-                st.metric("Profit Growth", _na(pg, ".1f", "%"),
-                          delta=f"{pg:+.1f}%" if pg is not None else None)
-            with g3:
-                eg = a['eps_growth_pct']
-                st.metric("EPS Growth", _na(eg, ".1f", "%"),
-                          delta=f"{eg:+.1f}%" if eg is not None else None)
-
-            # ── Section 2: Valuation & Profitability ─────────────────────
-            st.markdown("#### 2 & 3. Valuation & Profitability Ratios")
-            v1, v2, v3, v4, v5, v6, v7 = st.columns(7)
-            with v1: st.metric("P/E Ratio",     _na(a['pe'], ".1f"))
-            with v2: st.metric("P/B Ratio",     _na(a['pb'], ".2f"))
-            with v3: st.metric("P/CF Ratio",    _na(a['pcf'], ".1f"))
-            with v4: st.metric("ROE",           _na(a['roe'], ".1f", "%"))
-            with v5: st.metric("ROA",           _na(a['roa'], ".1f", "%"))
-            with v6: st.metric("Current Ratio", _na(a['current_ratio'], ".2f"))
-            with v7: st.metric("Debt/Equity",   _na(a['de'], ".2f"))
-
-            # ── Section 4: Dividend ───────────────────────────────────────
-            st.markdown("#### 4. Dividend Metrics")
-            d1, d2 = st.columns(2)
-            with d1: st.metric("Dividend Yield",  _na(a['div_yield'], ".1f", "%"))
-            with d2: st.metric("Payout Ratio",    _na(a['payout_ratio'], ".1f", "%"))
-
-            # ── Section 5: Graham Score Table ─────────────────────────────
-            st.markdown("#### 5. Graham Score Table (max 15 pts)")
-            score_df = pd.DataFrame(a['score_table'])[["Criterion", "Value", "Points", "Score"]]
-            st.dataframe(
-                score_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Score": st.column_config.ProgressColumn("Score", max_value=3, format="%d"),
-                },
-            )
-            st.markdown(f"**Total: {score}/15 — Grade {grade}**")
-
-            # ── Section 6: Margin of Safety ───────────────────────────────
-            st.markdown("#### 6. Margin of Safety (Sri Lanka Formula)")
-            m1, m2, m3, m4 = st.columns(4)
-            with m1: st.metric("Intrinsic Value (LKR)", f"{a['intrinsic_value']:.2f}",
-                                help="EPS × 7.4  (g=5%, Y=11%)")
-            with m2: st.metric("Market Price (LKR)",    f"{a['market_price']:.2f}" if a['market_price'] > 0 else "N/A")
-            with m3: st.metric("Margin of Safety",      f"{a['mos_pct']:.1f}%")
-            with m4: st.metric("Max Buy Price (30% MOS)", f"{a['max_buy_price']:.2f}")
-            st.info(f"MOS Grade: **{a['mos_grade']}**")
-
-            # ── Section 7: Defensive Investor Checklist ───────────────────
-            st.markdown("#### 7. Defensive Investor Checklist")
-            def_df = pd.DataFrame(a['defensive_checklist'])[["Criterion", "Condition", "Result"]]
-            st.dataframe(def_df, use_container_width=True, hide_index=True)
-            passes = a['defensive_passes']
-            st.markdown(
-                f"**{passes}/5 criteria met — {a['defensive_verdict']}** "
-                f"({'Passes' if passes >= 4 else 'Fails'} Defensive Investor test)"
-            )
-
-            # ── Section 8: Final Recommendation ──────────────────────────
-            st.markdown("#### 8. Final Recommendation")
-            buy = a['buy_decision']
-            buy_color = (
-                "#1e7e34" if "YES" in buy else
-                "#ffc107" if "HOLD" in buy else
-                "#dc3545"
-            )
-            buy_text_color = "black" if "HOLD" in buy else "white"
-            alloc_lkr = a['allocation_pct'] / 100 * 50000
-            st.markdown(
-                f"""<div style="background:{buy_color};color:{buy_text_color};
-                padding:16px;border-radius:10px;margin-bottom:12px;">
-                <b style="font-size:1.3em">{buy}</b><br>
-                Graham Grade: <b>{grade}</b> &nbsp;|&nbsp;
-                Max Buy Price: <b>LKR {a['max_buy_price']:.2f}</b> &nbsp;|&nbsp;
-                Allocation: <b>{a['allocation_pct']}% of LKR 50,000 = LKR {alloc_lkr:,.0f}</b>
-                </div>""",
-                unsafe_allow_html=True,
-            )
-
-            # ── Section 9: Bottom Line ────────────────────────────────────
-            st.markdown("#### 9. Bottom Line")
-            st.info(a['bottom_line'])
+            _render_analysis_report(a, ticker_val, company_val, key_prefix="analyze_")
 
     # ── TAB 2: 5-YEAR TRENDS ──────────────────────────────────
     with tabs[1]:
@@ -856,26 +836,52 @@ else:
 
     # ── TAB 5: HISTORY ────────────────────────────────────────
     with tabs[4]:
-        st.subheader("Analysis Logs")
+        st.subheader("Analysis History")
         show_auto = st.checkbox("Include auto-analyzed reports (pipeline)", value=True, key="hist_show_auto")
         history_df = get_history(user, include_auto=show_auto)
-        if not history_df.empty:
+
+        if history_df.empty:
+            st.info("No analysis records found.")
+        else:
+            history_df = history_df.reset_index(drop=True)
             display_df = history_df[['date', 'company_name', 'ticker', 'score', 'recommendation', 'source']].copy()
             display_df['source'] = display_df['source'].fillna('manual').replace(
                 {'manual': 'Manual', 'auto': 'Auto'}
             )
-            st.dataframe(
+
+            st.caption(f"{len(history_df)} records — click a row to view the full analysis")
+            event = st.dataframe(
                 display_df,
                 use_container_width=True,
                 hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
                 column_config={
                     "source": st.column_config.TextColumn("Source"),
                     "score": st.column_config.NumberColumn("Score", format="%d/15"),
-                }
+                },
             )
-            st.caption(f"{len(history_df)} records — {(history_df['source'] == 'auto').sum()} auto-analyzed")
-        else:
-            st.info("No analysis records found.")
+
+            selected_rows = event.selection.rows if hasattr(event, 'selection') else []
+            if selected_rows:
+                idx = selected_rows[0]
+                row = history_df.iloc[idx]
+                st.markdown("---")
+                st.caption(f"Analyzed: {row['date']}  ·  Source: {row.get('source', 'manual')}")
+                try:
+                    data = json.loads(row['data_json']) if isinstance(row['data_json'], str) else row['data_json']
+                    # Use cached _analysis if present, otherwise recompute
+                    a = data.get('_analysis') or calculate_full_analysis(data)
+                    _render_analysis_report(
+                        a,
+                        str(row['ticker']),
+                        str(row['company_name']),
+                        key_prefix=f"hist_{idx}_",
+                    )
+                except Exception as e:
+                    st.error(f"Could not render analysis: {e}")
+                    with st.expander("Raw data_json"):
+                        st.json(data if 'data' in dir() else {})
 
 # --- FOOTER ---
 st.markdown("---")
