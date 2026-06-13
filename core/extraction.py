@@ -104,6 +104,18 @@ def _parse_json_response(text):
 # ---------------------------------------------------------------------------
 
 def detect_page_offset(reader, max_scan=20):
+    # Fix 4: try pypdf page labels first (most reliable)
+    try:
+        labels = list(reader.page_labels)
+        for i, label in enumerate(labels):
+            if label and str(label).isdigit():
+                n = int(label)
+                if 1 <= n <= 10:
+                    return i - (n - 1)
+    except Exception:
+        pass
+
+    # Fall back to heuristic: look for small digit in top/bottom lines
     for i in range(min(max_scan, len(reader.pages))):
         text = reader.pages[i].extract_text() or ""
         lines = [l.strip() for l in text.strip().split('\n') if l.strip()]
@@ -123,7 +135,7 @@ def _find_toc_page_indices(reader, max_scan=30):
         text = reader.pages[i].extract_text() or ""
         lines = [l.strip() for l in text.split('\n') if l.strip()]
         for line in lines[:20]:
-            if len(line) <= 40 and _TOC_HEADING_RE.search(line):
+            if len(line) <= 60 and _TOC_HEADING_RE.search(line):
                 for j in range(i, min(i + 3, total)):
                     if j not in found:
                         found.append(j)
@@ -194,17 +206,110 @@ def parse_toc_loosely(toc_text):
                 sections.append({'name': name, 'printed_page': page})
     return sections if sections else []
 
+
+# ---------------------------------------------------------------------------
+# Fix 1: smarter keyword scan — dedup by keyword type, heading-only lines
+# ---------------------------------------------------------------------------
+
+def _keyword_scan(reader, total_pages):
+    """
+    Scan the full document for financial statement section headings.
+    Returns (set of 0-based PDF indices, page_sections list).
+
+    Two constraints vs the old scan:
+    1. Dedup by keyword — each statement type matched at most once, taking the
+       first (earliest) occurrence which is the actual section heading page.
+    2. Heading-only — keyword must appear on a short line (≤ 80 chars) so it's
+       a title, not buried in paragraph text or notes.
+    """
+    found_keywords = set()
+    relevant_indices = set()
+    page_sections = []
+
+    for i, page in enumerate(reader.pages):
+        text = page.extract_text() or ""
+        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        for line in lines:
+            if len(line) > 80:
+                continue  # skip paragraph text
+            low = line.lower()
+            for kw in _TOC_KEYWORDS:
+                if kw in low and kw not in found_keywords:
+                    found_keywords.add(kw)
+                    relevant_indices.add(i)
+                    if i + 1 < total_pages:
+                        relevant_indices.add(i + 1)
+                    sent = [i + 1] + ([i + 2] if i + 1 < total_pages else [])
+                    page_sections.append({'name': kw.title(), 'toc_page': None, 'pdf_pages': sent})
+                    break  # one keyword per line is enough
+
+    return relevant_indices, page_sections
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: OpenRouter TOC parser — used in pipeline mode when local parsers fail
+# ---------------------------------------------------------------------------
+
+_TOC_AI_PROMPT = """This is text extracted from a financial report's table of contents / index page.
+Identify the printed page numbers for ALL financial statement sections.
+
+Look for ANY of these (use exact name from the document):
+- Income Statement / Statement of Profit or Loss / Comprehensive Income
+- Statement of Financial Position / Balance Sheet
+- Statement of Changes in Equity
+- Statement of Cash Flows
+- Notes to Financial Statements / Accounting Policies
+- Financial Highlights / Five-Year Summary / Ten-Year Summary
+- Per Share Data / Investor Information / Shareholders Information
+- Financial Ratios / Key Performance Indicators / Capital Market Data
+
+Return ONLY valid JSON (no markdown):
+{"toc_found": true, "sections": [{"name": "exact name", "printed_page": 85}]}
+If nothing readable: {"toc_found": false, "sections": []}
+
+Document text:
+"""
+
+
+def _parse_toc_with_openrouter(toc_text, model_id, openrouter_key):
+    """Call OpenRouter with only the TOC page text to extract section page numbers."""
+    try:
+        resp = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {openrouter_key}", "Content-Type": "application/json"},
+            json={
+                "model": model_id,
+                "messages": [{"role": "user", "content": _TOC_AI_PROMPT + toc_text[:8000]}],
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        msg = resp.json()["choices"][0]["message"]
+        raw = msg.get("content") or msg.get("reasoning_content") or ""
+        result = _parse_json_response(raw)
+        sections = result.get("sections", []) if result.get("toc_found") else []
+        log.info("OpenRouter TOC parse: %d sections found", len(sections))
+        return sections
+    except Exception as e:
+        log.warning("OpenRouter TOC parse failed: %s", e)
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Page relevance detection
 # notify_fn receives (level, message) where level is 'info'|'warning'|'success'
 # ---------------------------------------------------------------------------
 
-def _find_relevant_pages(reader, allow_gemini_toc=True, notify_fn=None):
+def _find_relevant_pages(reader, allow_gemini_toc=True, notify_fn=None,
+                          openrouter_key=None, openrouter_model=None):
     """
     Shared page-detection logic for both Gemini and OpenRouter paths.
     Returns (page_map, sorted list of 0-based PDF indices).
-    allow_gemini_toc=False skips the Gemini TOC API call (used in OpenRouter/pipeline mode).
-    notify_fn(level, msg) is called for progress messages; defaults to logging.
+
+    allow_gemini_toc=False  — skip Gemini API call (pipeline mode)
+    openrouter_key/model    — when provided, use OpenRouter for AI TOC parsing
+                              instead of (or as fallback after) Gemini
+    notify_fn(level, msg)   — progress callbacks; defaults to logging
     """
     def _notify(level, msg):
         if notify_fn:
@@ -228,68 +333,55 @@ def _find_relevant_pages(reader, allow_gemini_toc=True, notify_fn=None):
         toc_label = f"PDF page(s) {[i + 1 for i in toc_indices]}"
         _notify('info', f"Contents page found at {toc_label}. Reading entries...")
 
+        # Attempt 1: strict local parse (requires separator chars)
         sections = parse_toc_locally(toc_text)
         if sections:
             _notify('info', f"Parsed locally — {len(sections)} financial sections found (no API call).")
             toc_data = {"toc_found": True, "sections": sections}
         else:
+            # Attempt 2: loose local parse (keyword + any trailing number)
             sections = parse_toc_loosely(toc_text)
             if sections:
                 _notify('info', f"Parsed (loose match) — {len(sections)} financial sections found (no API call).")
                 toc_data = {"toc_found": True, "sections": sections}
-            elif allow_gemini_toc:
-                import google.generativeai as genai
-                _notify('info', "Local parse inconclusive — using Gemini to read contents page...")
-                model = genai.GenerativeModel("gemini-2.0-flash")
-                toc_prompt = f"""Analyze this text extracted from an annual financial report's contents page.
-The contents page may be titled: TABLE OF CONTENTS, CONTENTS, CONTENT, or INDEX.
-Identify the printed page numbers for ALL financial statement sections listed in it.
-
-Look for ANY of these sections (use the exact name from the document, not these labels):
-- Income Statement / Statement of Profit or Loss / Statement of Profit or Loss and Other Comprehensive Income
-- Statement of Financial Position / Balance Sheet / Consolidated Balance Sheet
-- Statement of Changes in Equity (including Group and Bank variants)
-- Statement of Cash Flows / Consolidated Statement of Cash Flows
-- Notes to Financial Statements / Accounting Policies / Significant Accounting Policies
-- Financial Highlights / Five-Year Summary / Ten-Year Summary / Key Financial Indicators
-- Per Share Data / Share Information / Investor Information / Shareholders Information / Capital Market Data
-- Financial Ratios / Key Performance Indicators / KPIs / Segmental Information
-
-Return ONLY valid JSON (no markdown):
-{{"toc_found": true, "sections": [{{"name": "exact section name from document", "printed_page": 85}}]}}
-If no contents entries are readable: {{"toc_found": false, "sections": []}}
-
-Document text:
-{toc_text[:12000]}"""
-                toc_resp = model.generate_content(toc_prompt)
-                toc_data = _parse_json_response(toc_resp.text)
+            else:
+                # Attempt 3a: OpenRouter AI parse (pipeline mode)
+                if openrouter_key and openrouter_model:
+                    _notify('info', "Local parse inconclusive — using OpenRouter to read contents page...")
+                    sections = _parse_toc_with_openrouter(toc_text, openrouter_model, openrouter_key)
+                    if sections:
+                        toc_data = {"toc_found": True, "sections": sections}
+                # Attempt 3b: Gemini AI parse (Streamlit mode)
+                elif allow_gemini_toc:
+                    import google.generativeai as genai
+                    _notify('info', "Local parse inconclusive — using Gemini to read contents page...")
+                    model = genai.GenerativeModel("gemini-2.0-flash")
+                    toc_prompt = (
+                        _TOC_AI_PROMPT.replace(
+                            "Return ONLY valid JSON (no markdown):",
+                            "Return ONLY valid JSON (no markdown, no extra text):"
+                        ) + toc_text[:12000]
+                    )
+                    toc_resp = model.generate_content(toc_prompt)
+                    toc_data = _parse_json_response(toc_resp.text)
     else:
+        # Fix 1: smarter keyword scan when no TOC heading found
         _notify('warning', "No contents page found — scanning all pages for financial statement keywords.")
         page_map['method'] = 'keyword_scan'
-        relevant_pdf_indices = set()
-        page_keyword: dict = {}
-        for i, page in enumerate(reader.pages):
-            text = (page.extract_text() or "").lower()
-            for kw in _TOC_KEYWORDS:
-                if kw in text and i not in page_keyword:
-                    page_keyword[i] = kw
-                    relevant_pdf_indices.add(i)
-                    if i + 1 < total_pages:
-                        relevant_pdf_indices.add(i + 1)
-                    break
-        for pg_idx, kw in sorted(page_keyword.items()):
-            sent = [pg_idx + 1] + ([pg_idx + 2] if pg_idx + 1 < total_pages else [])
-            page_map['sections'].append({'name': kw.title(), 'toc_page': None, 'pdf_pages': sent})
-        relevant_pages = sorted(list(relevant_pdf_indices))
+        relevant_pdf_indices, page_sections = _keyword_scan(reader, total_pages)
+        page_map['sections'] = page_sections
+        relevant_pages = sorted(relevant_pdf_indices)
         if not relevant_pages:
             page_map['method'] = 'fallback'
-            _notify('warning', "No financial pages found — using first 15 pages.")
-            relevant_pages = list(range(min(15, total_pages)))
-            page_map['sections'] = [{'name': 'Fallback — first 15 pages', 'toc_page': None,
-                                      'pdf_pages': list(range(1, min(16, total_pages + 1)))}]
+            _notify('warning', "No financial pages found — using last quarter of document.")
+            start = max(0, int(total_pages * 0.75))
+            relevant_pages = list(range(start, min(start + 20, total_pages)))
+            page_map['sections'] = [{'name': 'Fallback — last quarter', 'toc_page': None,
+                                      'pdf_pages': [p + 1 for p in relevant_pages]}]
         page_map['pages_sent'] = [p + 1 for p in relevant_pages]
         return page_map, relevant_pages
 
+    # Map TOC section printed page numbers → PDF indices
     relevant_pdf_indices = set()
     if toc_data.get("toc_found") and toc_data.get("sections"):
         offset = detect_page_offset(reader)
@@ -308,14 +400,22 @@ Document text:
                     'name': sec.get('name', ''), 'toc_page': printed, 'pdf_pages': pages_for_sec,
                 })
 
+    # Fix 2: when TOC found but not parsed, use keyword scan (not "first 15 pages")
     if not relevant_pdf_indices:
-        page_map['method'] = 'fallback'
-        _notify('warning', "Contents page found but entries could not be read — using first 15 pages.")
-        relevant_pdf_indices = set(range(min(15, total_pages)))
-        page_map['sections'] = [{'name': 'Fallback — first 15 pages', 'toc_page': None,
-                                  'pdf_pages': list(range(1, min(16, total_pages + 1)))}]
+        page_map['method'] = 'keyword_scan_fallback'
+        _notify('warning', "Contents page found but entries could not be read — falling back to keyword scan.")
+        relevant_pdf_indices, page_sections = _keyword_scan(reader, total_pages)
+        page_map['sections'] = page_sections
+        if not relevant_pdf_indices:
+            # Absolute last resort: financial statements are always in the latter part
+            page_map['method'] = 'fallback'
+            start = max(0, int(total_pages * 0.75))
+            relevant_pdf_indices = set(range(start, min(start + 20, total_pages)))
+            page_map['sections'] = [{'name': 'Fallback — last quarter', 'toc_page': None,
+                                      'pdf_pages': [p + 1 for p in sorted(relevant_pdf_indices)]}]
+            _notify('warning', f"Keyword scan also empty — using last quarter of document (pages {start+1}+).")
 
-    relevant_pages = sorted(list(relevant_pdf_indices))
+    relevant_pages = sorted(relevant_pdf_indices)
     page_map['pages_sent'] = [p + 1 for p in relevant_pages]
     return page_map, relevant_pages
 
@@ -332,7 +432,13 @@ def extract_with_openrouter(pdf_path: str, model_id: str, openrouter_key: str):
     try:
         with open(pdf_path, 'rb') as f:
             reader = PdfReader(f)
-            page_map, relevant_pages = _find_relevant_pages(reader, allow_gemini_toc=False)
+            # Fix 3: forward key/model so OpenRouter TOC parsing is available in pipeline mode
+            page_map, relevant_pages = _find_relevant_pages(
+                reader,
+                allow_gemini_toc=False,
+                openrouter_key=openrouter_key,
+                openrouter_model=model_id,
+            )
             total_pages = page_map['total_pages']
 
             log.info(f"Extracting text from {len(relevant_pages)} of {total_pages} targeted pages...")
