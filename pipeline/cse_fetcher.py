@@ -120,18 +120,28 @@ def parse_announcement_date(item: dict) -> datetime | None:
 
 def fetch_all_since(cutoff_date: datetime, page_size: int = 100) -> list[dict]:
     """Paginate CSE API returning all announcements with date >= cutoff_date.
-    API returns newest-first. Stops when an entire page falls before cutoff. Safety cap: 50 pages.
+    Stops when a page contains no new item IDs (API returns same page repeatedly)
+    or when all items on a page fall before the cutoff. Safety cap: 50 pages.
     """
     _min_dt = datetime.min.replace(tzinfo=timezone.utc)
     all_items: list[dict] = []
+    seen_ids: set = set()
+
     for page in range(1, 51):
         items = fetch_announcements(page=page, page_size=page_size)
         if not items:
             break
-        in_range = [i for i in items if (parse_announcement_date(i) or _min_dt) >= cutoff_date]
+        new_items = [i for i in items if i.get("id") not in seen_ids]
+        if not new_items:
+            log.info("fetch_all_since: page %d returned no new items — API does not paginate further", page)
+            break
+        for i in new_items:
+            seen_ids.add(i.get("id"))
+        in_range = [i for i in new_items if (parse_announcement_date(i) or _min_dt) >= cutoff_date]
         all_items.extend(in_range)
         if not in_range:
             break
+
     log.info("fetch_all_since: %d reports found since %s", len(all_items), cutoff_date.date())
     return all_items
 
