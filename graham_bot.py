@@ -91,6 +91,14 @@ from core.db import (
     add_to_watchlist, remove_from_watchlist, is_on_watchlist, get_watchlist_with_scores,
     add_alert, get_alerts, delete_alert,
     check_and_fire_alerts,
+    is_report_processed, mark_report_processed,
+)
+from pipeline.cse_fetcher import (
+    fetch_announcements as _cse_fetch_announcements,
+    filter_reports as _cse_filter_reports,
+    get_pdf_url as _cse_get_pdf_url,
+    get_report_metadata as _cse_get_report_metadata,
+    download_pdf as _cse_download_pdf,
 )
 from core.extraction import (
     _parse_json_response, _find_relevant_pages,
@@ -374,7 +382,54 @@ else:
         with st.expander("Raw extracted data (JSON)", expanded=False):
             st.json(a)
 
-    tabs = st.tabs(["Analyze New Report", "5-Year Trends", "Watchlist", "Alerts", "Analysis History"])
+    def _cse_analyze_url(pdf_url: str, ticker: str, company: str,
+                         report_type: str, fiscal_year: str, model_id: str):
+        """Download a CSE PDF, extract, score, and save. Shows result inline."""
+        import tempfile, os as _os
+        if is_report_processed(pdf_url):
+            st.warning(f"⚠️ This report ({ticker}) is already saved in the database.")
+            return
+        if not OPENROUTER_API_KEY:
+            st.error("OPENROUTER_API_KEY not configured. Cannot run extraction.")
+            return
+        tmp_path = None
+        try:
+            with st.spinner(f"Downloading {ticker} PDF…"):
+                tmp_fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
+                _os.close(tmp_fd)
+                ok = _cse_download_pdf(pdf_url, tmp_path)
+            if not ok:
+                st.error("PDF download failed. Check the URL and try again.")
+                return
+            with st.spinner(f"Extracting financial data from {ticker}… (30–90 s)"):
+                raw, page_map = _extract_with_openrouter_headless(tmp_path, model_id, OPENROUTER_API_KEY)
+        finally:
+            if tmp_path and _os.path.exists(tmp_path):
+                _os.remove(tmp_path)
+
+        if raw is None:
+            st.error("Extraction failed — PDF may be scanned or unreadable.")
+            return
+
+        raw["ticker"] = ticker
+        raw["company_name"] = company
+        raw["report_type"] = report_type
+        if not raw.get("fiscal_year") and fiscal_year:
+            raw["fiscal_year"] = fiscal_year
+
+        analysis = calculate_full_analysis(raw)
+        merged = {**raw, "_analysis": analysis}
+        aid = save_analysis(user, company, ticker, merged,
+                            analysis["graham_score"], analysis["recommendation"], source="manual")
+        mark_report_processed(ticker, company, report_type,
+                               str(raw.get("fiscal_year", fiscal_year)), pdf_url, aid)
+        st.success(
+            f"✅ **{company} ({ticker})** saved — "
+            f"Score: {analysis['graham_score']}/15  |  {analysis['recommendation']}"
+        )
+        _render_analysis_report(analysis, ticker, company, key_prefix=f"cse_{ticker}_")
+
+    tabs = st.tabs(["Analyze New Report", "5-Year Trends", "Watchlist", "Alerts", "Analysis History", "CSE Reports"])
 
     # ── TAB 1: ANALYZE ────────────────────────────────────────
     with tabs[0]:
@@ -931,6 +986,132 @@ else:
                     st.error(f"Could not render analysis: {e}")
                     with st.expander("Raw data_json"):
                         st.json(data if 'data' in dir() else {})
+
+    # ── TAB 6: CSE REPORTS ────────────────────────────────────────────
+    with tabs[5]:
+        st.subheader("Browse & Add CSE Reports")
+
+        _CSE_MODELS_TAB = {
+            "GPT-OSS 120B (Free)": "openai/gpt-oss-120b:free",
+            "Gemma 4 31B (Free)": "google/gemma-4-31b-it:free",
+            "DeepSeek V4 Flash (Free)": "deepseek/deepseek-v4-flash:free",
+        }
+        cse_model_id = _CSE_MODELS_TAB[
+            st.selectbox("AI Model for extraction", list(_CSE_MODELS_TAB.keys()), key="cse_model_sel")
+        ]
+
+        # ── SECTION A: Live CSE feed ──────────────────────────────────
+        st.markdown("#### Live CSE Announcements")
+        st.caption("Latest financial reports published on the Colombo Stock Exchange")
+
+        if st.button("🔄 Refresh feed", key="cse_refresh_btn"):
+            st.rerun()
+
+        try:
+            _cse_raw_items = _cse_fetch_announcements()
+            _cse_feed = _cse_filter_reports(_cse_raw_items)
+        except Exception as _e:
+            st.error(f"Could not fetch CSE feed: {_e}")
+            _cse_feed = []
+
+        if _cse_feed:
+            _feed_rows = []
+            for _item in _cse_feed:
+                _meta = _cse_get_report_metadata(_item)
+                _purl = _cse_get_pdf_url(_item)
+                _in_db = is_report_processed(_purl)
+                _feed_rows.append({
+                    "Company": _meta["company_name"],
+                    "Ticker": _meta["ticker"],
+                    "Type": _meta["report_type"].title(),
+                    "Year": _meta["fiscal_year"],
+                    "Published": _item.get("uploadedDate", "")[:11],
+                    "Status": "✅ In DB" if _in_db else "🆕 New",
+                    "_url": _purl,
+                    "_ticker": _meta["ticker"],
+                    "_company": _meta["company_name"],
+                    "_rtype": _meta["report_type"],
+                    "_fyear": _meta["fiscal_year"],
+                    "_in_db": _in_db,
+                })
+            _feed_df = pd.DataFrame(_feed_rows)
+            _feed_event = st.dataframe(
+                _feed_df[["Company", "Ticker", "Type", "Year", "Published", "Status"]],
+                use_container_width=True,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                column_config={"Status": st.column_config.TextColumn("Status", width="small")},
+                key="cse_feed_table",
+            )
+            _feed_sel = _feed_event.selection.rows if hasattr(_feed_event, "selection") else []
+            if _feed_sel:
+                _fr = _feed_df.iloc[_feed_sel[0]]
+                st.markdown("---")
+                if _fr["_in_db"]:
+                    st.info(f"✅ **{_fr['_ticker']} — {_fr['Company']}** is already in the database. "
+                            f"Open **Analysis History** to view it.")
+                else:
+                    st.info(f"Selected: **{_fr['_ticker']} — {_fr['Company']}** "
+                            f"({_fr['Type']} {_fr['Year']}, published {_fr['Published']})")
+                    if st.button("⚡ Analyze & Save to DB", key="cse_feed_analyze_btn"):
+                        _cse_analyze_url(
+                            pdf_url=_fr["_url"],
+                            ticker=_fr["_ticker"],
+                            company=_fr["_company"],
+                            report_type=_fr["_rtype"],
+                            fiscal_year=_fr["_fyear"],
+                            model_id=cse_model_id,
+                        )
+        else:
+            st.info("No recent financial reports on the CSE feed right now.")
+
+        # ── SECTION B: Add by PDF URL ─────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### Add Any Report by URL")
+        st.caption(
+            "Visit the CSE website, open a company profile, right-click a report link "
+            "and copy the PDF URL, then paste it below."
+        )
+        _lc1, _lc2 = st.columns(2)
+        with _lc1:
+            st.link_button(
+                "📋 CSE Company Directory",
+                "https://www.cse.lk/listed-entities/listed-company-directory?page=ALPHABETICAL",
+            )
+        with _lc2:
+            st.link_button(
+                "🔍 Example: HAYC Profile",
+                "https://www.cse.lk/company-profile?symbol=HAYC.N0000",
+            )
+
+        _url_in = st.text_input(
+            "PDF URL",
+            placeholder="https://cdn.cse.lk/cmt/upload_report_file/...",
+            key="cse_url_in",
+        )
+        if _url_in.strip():
+            _uc1, _uc2, _uc3 = st.columns(3)
+            with _uc1:
+                _url_company = st.text_input("Company Name *", key="cse_url_company")
+            with _uc2:
+                _url_ticker = st.text_input("Ticker Symbol *",
+                                            placeholder="e.g. HAYC", key="cse_url_ticker")
+            with _uc3:
+                _url_rtype = st.selectbox("Report Type",
+                                          ["annual", "quarterly", "financial"], key="cse_url_rtype")
+            if st.button("⚡ Download & Analyze", key="cse_url_btn"):
+                if not _url_company.strip() or not _url_ticker.strip():
+                    st.error("Company Name and Ticker Symbol are required.")
+                else:
+                    _cse_analyze_url(
+                        pdf_url=_url_in.strip(),
+                        ticker=_url_ticker.strip().upper(),
+                        company=_url_company.strip(),
+                        report_type=_url_rtype,
+                        fiscal_year="",
+                        model_id=cse_model_id,
+                    )
 
 # --- FOOTER ---
 st.markdown("---")
