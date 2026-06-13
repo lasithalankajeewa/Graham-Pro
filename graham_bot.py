@@ -894,7 +894,7 @@ else:
                     data = json.loads(row['data_json']) if isinstance(row['data_json'], str) else row['data_json']
                     analysis_id = int(row['id']) if 'id' in row.index else None
 
-                    # ── Market price input (shown when price is missing) ──────
+                    # ── Market price (always editable) ───────────────────────
                     stored_price = float(data.get('market_price') or 0)
                     price_key = f"hist_price_{idx}"
                     if price_key not in st.session_state:
@@ -905,27 +905,28 @@ else:
                             "**Market price not in this report.** "
                             "Enter the current CSE market price to compute P/E, P/B, and Margin of Safety."
                         )
-                        mp_col, btn_col = st.columns([3, 1])
-                        with mp_col:
-                            entered_price = st.number_input(
-                                "Current Market Price (LKR)",
-                                min_value=0.0, step=0.10, format="%.2f",
-                                value=st.session_state[price_key],
-                                key=f"hist_price_input_{idx}",
-                            )
-                        with btn_col:
-                            st.markdown("<br>", unsafe_allow_html=True)
-                            if st.button("Save Price", key=f"hist_save_price_{idx}",
-                                         disabled=(entered_price <= 0 or analysis_id is None)):
-                                if update_analysis_market_price(analysis_id, entered_price):
-                                    st.session_state[price_key] = entered_price
-                                    st.success(f"Saved LKR {entered_price:.2f} — analysis updated.")
-                                    st.rerun()
-                                else:
-                                    st.error("Could not update database record.")
-                        # Apply entered price to live computation
-                        if entered_price > 0:
-                            data = {**data, 'market_price': entered_price}
+                    mp_col, btn_col = st.columns([3, 1])
+                    with mp_col:
+                        entered_price = st.number_input(
+                            "Current Market Price (LKR)",
+                            min_value=0.0, step=0.10, format="%.2f",
+                            value=st.session_state[price_key],
+                            key=f"hist_price_input_{idx}",
+                        )
+                    with btn_col:
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        if st.button("Update Price", key=f"hist_save_price_{idx}",
+                                     disabled=(entered_price <= 0 or analysis_id is None)):
+                            if update_analysis_market_price(analysis_id, entered_price):
+                                st.session_state[price_key] = entered_price
+                                st.success(f"Saved LKR {entered_price:.2f}")
+                                st.rerun()
+                            else:
+                                st.error("Could not update database record.")
+                    # Apply entered/updated price to live computation
+                    effective_price = entered_price if entered_price > 0 else stored_price
+                    if effective_price != stored_price:
+                        data = {**data, 'market_price': effective_price}
 
                     # Recompute with latest data (uses saved or entered price)
                     a = calculate_full_analysis(data)

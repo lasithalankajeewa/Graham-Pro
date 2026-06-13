@@ -60,6 +60,13 @@ def calculate_full_analysis(data: dict) -> dict:
     ai_roe = _f(data.get('roe'))
     ai_de  = _f(data.get('debt_to_equity'))
 
+    # Derive EPS from net_income / shares when AI extracted 0 but components exist.
+    # Both fields are in millions (LKR millions / million shares = LKR per share).
+    if eps == 0 and net_income > 0 and shares > 0:
+        eps = net_income / shares
+    if eps_prev == 0 and net_income_prev > 0 and shares > 0:
+        eps_prev = net_income_prev / shares
+
     # ── Growth Rates ─────────────────────────────────────────────────────────
     revenue_growth = _pct(revenue, revenue_prev)
     profit_growth  = _pct(net_income, net_income_prev)
