@@ -855,15 +855,22 @@ else:
             display_df['source'] = display_df['source'].fillna('manual').replace(
                 {'manual': 'Manual', 'auto': 'Auto'}
             )
+            _rt_map = {"annual": "Annual", "quarterly": "Quarterly", "financial": "Financial"}
+            display_df['type'] = history_df['data_json'].apply(
+                lambda s: _rt_map.get(
+                    (json.loads(s) if isinstance(s, str) else s).get("report_type", ""), "Annual"
+                ) if s else "Annual"
+            )
 
             st.caption(f"{len(history_df)} records — click a row to view the full analysis")
             event = st.dataframe(
-                display_df,
+                display_df[['date', 'company_name', 'ticker', 'type', 'score', 'recommendation', 'source']],
                 use_container_width=True,
                 hide_index=True,
                 on_select="rerun",
                 selection_mode="single-row",
                 column_config={
+                    "type": st.column_config.TextColumn("Type"),
                     "source": st.column_config.TextColumn("Source"),
                     "score": st.column_config.NumberColumn("Score", format="%d/15"),
                 },

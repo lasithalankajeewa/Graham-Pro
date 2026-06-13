@@ -20,6 +20,7 @@ PDF URL = https://cdn.cse.lk/{path}
 """
 import logging
 import os
+from datetime import datetime, timezone
 
 import requests
 
@@ -102,6 +103,39 @@ def get_report_metadata(announcement: dict) -> dict:
         "report_type": report_type,
         "fiscal_year": fiscal_year,
     }
+
+
+def parse_announcement_date(item: dict) -> datetime | None:
+    """Parse manualDate (ms epoch) → UTC datetime. Falls back to uploadedDate string."""
+    ts = item.get("manualDate")
+    if ts:
+        try:
+            return datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+        except Exception:
+            pass
+    uploaded = item.get("uploadedDate") or ""
+    try:
+        return datetime.strptime(uploaded, "%d %b %Y %I:%M:%S %p").replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def fetch_all_since(cutoff_date: datetime, page_size: int = 100) -> list[dict]:
+    """Paginate CSE API returning all announcements with date >= cutoff_date.
+    API returns newest-first. Stops when an entire page falls before cutoff. Safety cap: 50 pages.
+    """
+    _min_dt = datetime.min.replace(tzinfo=timezone.utc)
+    all_items: list[dict] = []
+    for page in range(1, 51):
+        items = fetch_announcements(page=page, page_size=page_size)
+        if not items:
+            break
+        in_range = [i for i in items if (parse_announcement_date(i) or _min_dt) >= cutoff_date]
+        all_items.extend(in_range)
+        if not in_range:
+            break
+    log.info("fetch_all_since: %d reports found since %s", len(all_items), cutoff_date.date())
+    return all_items
 
 
 def download_pdf(pdf_url: str, dest_path: str) -> bool:

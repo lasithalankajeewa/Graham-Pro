@@ -21,6 +21,7 @@ from core.extraction import extract_with_openrouter
 from core.scoring import calculate_full_analysis, calculate_graham_score
 from pipeline.cse_fetcher import (
     download_pdf,
+    fetch_all_since,
     fetch_announcements,
     filter_reports,
     get_pdf_url,
@@ -37,14 +38,22 @@ def run_pipeline(
     openrouter_key: str,
     tmp_dir: str | None = None,
     max_reports: int | None = None,
+    backfill_since: str | None = None,
 ) -> dict:
     """
     Run a full pipeline cycle. Returns summary counts.
     max_reports: cap for testing (None = no cap).
+    backfill_since: ISO date string "YYYY-MM-DD" — fetches all pages since that date.
     """
     stats = {"processed": 0, "skipped": 0, "failed": 0, "alerts_fired": 0}
 
-    announcements = fetch_announcements()
+    if backfill_since:
+        from datetime import datetime, timezone
+        cutoff = datetime.fromisoformat(backfill_since).replace(tzinfo=timezone.utc)
+        log.info("Backfill mode: fetching all reports since %s", cutoff.date())
+        announcements = fetch_all_since(cutoff)
+    else:
+        announcements = fetch_announcements()
     reports = filter_reports(announcements)
 
     if max_reports:
@@ -95,6 +104,7 @@ def run_pipeline(
             rec   = analysis["recommendation"]
             mos   = analysis["mos_pct"]
 
+            raw["report_type"] = report_type
             # Merge full analysis into stored data so it's available in the UI
             merged = {**raw, "_analysis": analysis}
 

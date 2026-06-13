@@ -3,12 +3,17 @@ name: Daily CSE Pipeline
 on:
   schedule:
     - cron: "30 14 * * *"   # 20:00 IST (UTC+5:30) every day
-  workflow_dispatch:          # manual trigger for testing
+  workflow_dispatch:
+    inputs:
+      backfill_since:
+        description: "Backfill all reports since date (YYYY-MM-DD). Leave empty for normal daily run."
+        required: false
+        default: ""
 
 jobs:
   analyze:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 120
 
     steps:
       - uses: actions/checkout@v4
@@ -31,3 +36,4 @@ jobs:
           SMTP_PASSWORD:      ${{ secrets.SMTP_PASSWORD }}
           FROM_EMAIL:         ${{ secrets.FROM_EMAIL }}
           PIPELINE_MODEL:     ${{ vars.PIPELINE_MODEL }}
+          BACKFILL_SINCE:     ${{ github.event.inputs.backfill_since }}

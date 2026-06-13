@@ -38,12 +38,21 @@ def main():
     from core.db import init_db
     init_db()
 
+    backfill_since = os.getenv("BACKFILL_SINCE") or None
+
     log.info("Starting CSE pipeline with model: %s", model_id)
     log.info("Database backend: %s", "PostgreSQL" if "postgresql" in database_url else "SQLite")
+    if backfill_since:
+        log.info("BACKFILL MODE: fetching all reports since %s", backfill_since)
 
     with tempfile.TemporaryDirectory(prefix="graham_pipeline_") as tmp_dir:
         from pipeline.runner import run_pipeline
-        stats = run_pipeline(model_id=model_id, openrouter_key=openrouter_key, tmp_dir=tmp_dir)
+        stats = run_pipeline(
+            model_id=model_id,
+            openrouter_key=openrouter_key,
+            tmp_dir=tmp_dir,
+            backfill_since=backfill_since,
+        )
 
     log.info("Done. processed=%d skipped=%d failed=%d alerts=%d",
              stats["processed"], stats["skipped"], stats["failed"], stats["alerts_fired"])
