@@ -81,7 +81,7 @@ st.markdown("""
 # ============================================================
 # CORE IMPORTS  (pure Python — no Streamlit)
 # ============================================================
-from core.scoring import calculate_graham_score
+from core.scoring import calculate_graham_score, calculate_full_analysis
 from core.email_utils import send_alert_email, send_test_email
 from core.db import (
     init_db, hash_password, check_password,
@@ -356,68 +356,106 @@ else:
                          "Please enter it manually — it is required to track this company's history.")
 
             with st.form("edit_extracted_data"):
-                # ── Row 1: Company identity ──────────────────────────
-                c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
+                # ── Row 1: Company identity ───────────────────────────
+                c1, c2, c3 = st.columns([3, 2, 2])
                 with c1:
-                    company_name = st.text_input("Company Name *",
-                                                 value=raw.get('company_name', ''))
+                    company_name = st.text_input("Company Name *", value=raw.get('company_name', ''))
                 with c2:
                     ticker_default = _clean_ticker(raw.get('ticker'))
                     ticker = st.text_input(
                         "Ticker Symbol *" + ("  🔴 required" if ticker_missing else ""),
-                        value=ticker_default,
-                        placeholder="e.g. SAMP, AAPL",
+                        value=ticker_default, placeholder="e.g. SAMP, AAPL",
                         help="Used as the unique company ID in the database."
                     )
                 with c3:
                     fiscal_year = st.text_input("Fiscal Year", value=str(raw.get('fiscal_year', '')))
-                with c4:
-                    div_index = 0 if raw.get('dividend_paid') == 'Yes' else 1
-                    dividend_paid = st.selectbox("Dividend Paid", ["Yes", "No"], index=div_index)
 
-                st.markdown("##### Income & Returns")
-                c5, c6, c7, c8 = st.columns(4)
-                with c5:
+                # ── Current Year P&L ──────────────────────────────────
+                st.markdown("##### Current Year — Income Statement")
+                c4, c5, c6 = st.columns(3)
+                with c4:
                     revenue = st.number_input("Revenue (Millions)", value=_flt(raw.get('revenue')),
                                               min_value=0.0, format="%.2f")
-                with c6:
+                with c5:
                     net_income = st.number_input("Net Income (Millions)", value=_flt(raw.get('net_income')),
                                                  format="%.2f")
+                with c6:
+                    eps = st.number_input("EPS (Basic)", value=_flt(raw.get('eps')), format="%.4f")
+
+                # ── Previous Year P&L ─────────────────────────────────
+                st.markdown("##### Previous Year — Income Statement (for Growth Rates)")
+                c7, c8, c9 = st.columns(3)
                 with c7:
-                    eps = st.number_input("EPS", value=_flt(raw.get('eps')), format="%.4f")
+                    revenue_prev = st.number_input("Revenue Prev Year (M)", value=_flt(raw.get('revenue_prev')),
+                                                   min_value=0.0, format="%.2f")
                 with c8:
-                    roe = st.number_input("ROE (%)", value=_flt(raw.get('roe')), format="%.2f")
-
-                st.markdown("##### Valuation Ratios")
-                c9, c10, c11, c12 = st.columns(4)
+                    net_income_prev = st.number_input("Net Income Prev Year (M)",
+                                                      value=_flt(raw.get('net_income_prev')), format="%.2f")
                 with c9:
-                    pe_ratio = st.number_input("P/E Ratio", value=_flt(raw.get('pe_ratio')),
-                                               min_value=0.0, format="%.2f")
-                with c10:
-                    pb_ratio = st.number_input("P/B Ratio", value=_flt(raw.get('pb_ratio')),
-                                               min_value=0.0, format="%.2f")
-                with c11:
-                    debt_to_equity = st.number_input("Debt / Equity", value=_flt(raw.get('debt_to_equity')),
-                                                     min_value=0.0, format="%.4f")
-                with c12:
-                    earnings_growth = st.number_input("5yr Earnings Growth (%)",
-                                                      value=_flt(raw.get('earnings_growth_5yr')),
-                                                      format="%.2f")
+                    eps_prev = st.number_input("EPS Prev Year", value=_flt(raw.get('eps_prev')), format="%.4f")
 
+                # ── Balance Sheet ─────────────────────────────────────
                 st.markdown("##### Balance Sheet")
-                c13, c14, c15 = st.columns(3)
+                c10, c11, c12, c13, c14 = st.columns(5)
+                with c10:
+                    total_assets = st.number_input("Total Assets (M)", value=_flt(raw.get('total_assets')),
+                                                   min_value=0.0, format="%.2f")
+                with c11:
+                    total_equity = st.number_input("Total Equity (M)", value=_flt(raw.get('total_equity')),
+                                                   min_value=0.0, format="%.2f")
+                with c12:
+                    total_liabilities = st.number_input("Total Liabilities (M)",
+                                                        value=_flt(raw.get('total_liabilities')),
+                                                        min_value=0.0, format="%.2f")
                 with c13:
-                    current_assets = st.number_input("Current Assets (Millions)",
-                                                     value=_flt(raw.get('current_assets')),
+                    current_assets = st.number_input("Current Assets (M)", value=_flt(raw.get('current_assets')),
                                                      min_value=0.0, format="%.2f")
                 with c14:
-                    current_liabilities = st.number_input("Current Liabilities (Millions)",
+                    current_liabilities = st.number_input("Current Liabilities (M)",
                                                           value=_flt(raw.get('current_liabilities')),
                                                           min_value=0.0, format="%.2f")
+
+                # ── Market & Dividend Data ────────────────────────────
+                st.markdown("##### Market Data & Dividends")
+                c15, c16, c17, c18 = st.columns(4)
                 with c15:
-                    intrinsic_value_raw = st.number_input("Intrinsic Value (if stated, else 0)",
-                                                          value=_flt(raw.get('intrinsic_value')),
-                                                          min_value=0.0, format="%.2f")
+                    market_price = st.number_input("Market Price (LKR)", value=_flt(raw.get('market_price')),
+                                                   min_value=0.0, format="%.2f",
+                                                   help="Year-end closing price per share")
+                with c16:
+                    shares_outstanding = st.number_input("Shares Outstanding (M)",
+                                                         value=_flt(raw.get('shares_outstanding')),
+                                                         min_value=0.0, format="%.4f")
+                with c17:
+                    dividend_per_share = st.number_input("Dividend Per Share (LKR)",
+                                                         value=_flt(raw.get('dividend_per_share')),
+                                                         min_value=0.0, format="%.4f")
+                with c18:
+                    operating_cf = st.number_input("Operating Cash Flow (M)",
+                                                   value=_flt(raw.get('operating_cash_flow')),
+                                                   format="%.2f")
+
+                # ── AI-extracted fallback ratios (used when raw inputs are missing) ──
+                with st.expander("AI-Extracted Ratios (optional — override only if auto-calc is wrong)"):
+                    fa1, fa2, fa3, fa4, fa5, fa6 = st.columns(6)
+                    with fa1:
+                        pe_ratio = st.number_input("P/E Ratio", value=_flt(raw.get('pe_ratio')),
+                                                   min_value=0.0, format="%.2f")
+                    with fa2:
+                        pb_ratio = st.number_input("P/B Ratio", value=_flt(raw.get('pb_ratio')),
+                                                   min_value=0.0, format="%.2f")
+                    with fa3:
+                        roe = st.number_input("ROE (%)", value=_flt(raw.get('roe')), format="%.2f")
+                    with fa4:
+                        debt_to_equity = st.number_input("Debt/Equity", value=_flt(raw.get('debt_to_equity')),
+                                                         min_value=0.0, format="%.4f")
+                    with fa5:
+                        earnings_growth = st.number_input("5yr EPS Growth (%)",
+                                                          value=_flt(raw.get('earnings_growth_5yr')),
+                                                          format="%.2f")
+                    with fa6:
+                        div_index = 0 if raw.get('dividend_paid') == 'Yes' else 1
+                        dividend_paid = st.selectbox("Dividend Paid", ["Yes", "No"], index=div_index)
 
                 submitted = st.form_submit_button("✅ Confirm & Score", use_container_width=True)
 
@@ -430,25 +468,43 @@ else:
                         'company_name': company_name,
                         'ticker': ticker_clean,
                         'fiscal_year': fiscal_year,
+                        # Current year
                         'revenue': revenue,
                         'net_income': net_income,
                         'eps': eps,
-                        'roe': roe,
-                        'debt_to_equity': debt_to_equity,
-                        'pe_ratio': pe_ratio,
-                        'pb_ratio': pb_ratio,
-                        'earnings_growth_5yr': earnings_growth,
+                        # Previous year
+                        'revenue_prev': revenue_prev,
+                        'net_income_prev': net_income_prev,
+                        'eps_prev': eps_prev,
+                        # Balance sheet
+                        'total_assets': total_assets,
+                        'total_equity': total_equity,
+                        'total_liabilities': total_liabilities,
                         'current_assets': current_assets,
                         'current_liabilities': current_liabilities,
+                        # Market & dividends
+                        'market_price': market_price,
+                        'shares_outstanding': shares_outstanding,
+                        'dividend_per_share': dividend_per_share,
+                        'operating_cash_flow': operating_cf,
+                        # AI fallbacks
+                        'pe_ratio': pe_ratio,
+                        'pb_ratio': pb_ratio,
+                        'roe': roe,
+                        'debt_to_equity': debt_to_equity,
+                        'earnings_growth_5yr': earnings_growth,
                         'dividend_paid': dividend_paid,
-                        'intrinsic_value': intrinsic_value_raw,
                     }
-                    score, rec, checklist, mos, intrinsic_v = calculate_graham_score(edited_data)
+                    analysis = calculate_full_analysis(edited_data)
+                    score = analysis['graham_score']
+                    rec   = analysis['recommendation']
+                    mos   = analysis['mos_pct']
                     save_analysis(user, company_name, ticker_clean, edited_data, score, rec)
                     st.session_state.last_analysis = {
-                        'data': edited_data, 'score': score, 'rec': rec,
-                        'checklist': checklist, 'mos': mos, 'intrinsic_v': intrinsic_v,
-                        'ticker': ticker_clean, 'company': company_name,
+                        'data': edited_data,
+                        'full': analysis,
+                        'ticker': ticker_clean,
+                        'company': company_name,
                     }
                     st.session_state.extracted_data = None
                     fired = check_and_fire_alerts(user, ticker_clean, company_name, score, mos)
@@ -459,43 +515,141 @@ else:
         # ── PHASE 3: RESULTS (shown after Confirm & Score) ──────
         if st.session_state.last_analysis:
             la = st.session_state.last_analysis
-            data, score, rec, checklist, mos, intrinsic_v = (
-                la['data'], la['score'], la['rec'],
-                la['checklist'], la['mos'], la['intrinsic_v']
-            )
-            ticker_val = la['ticker']
+            ticker_val  = la['ticker']
             company_val = la['company']
+            # Support both new-style (with 'full' key) and legacy session state
+            if 'full' in la:
+                a = la['full']
+            else:
+                a = calculate_full_analysis(la.get('data', {}))
+
+            def _na(v, fmt=".1f", suffix=""):
+                if v is None: return "N/A"
+                return f"{v:{fmt}}{suffix}"
 
             st.markdown("---")
-            col1, col2, col3 = st.columns(3)
 
-            with col1:
-                st.metric("Graham Score", f"{score}/15")
-                rec_class = rec.lower().replace(" ", "-")
-                st.markdown(f'<div class="recommendation-card {rec_class}">{rec}</div>',
-                            unsafe_allow_html=True)
-                if ticker_val:
-                    on_wl = is_on_watchlist(user, ticker_val)
-                    label = "★ Remove from Watchlist" if on_wl else "☆ Add to Watchlist"
-                    if st.button(label):
-                        if on_wl:
-                            remove_from_watchlist(user, ticker_val)
-                        else:
-                            add_to_watchlist(user, ticker_val, company_val)
-                        st.rerun()
+            # ── Header banner ─────────────────────────────────────────────
+            grade = a['graham_grade']
+            score = a['graham_score']
+            rec   = a['recommendation']
+            grade_colors = {"A": "#1e7e34", "B": "#28a745", "C": "#ffc107", "D": "#dc3545"}
+            grade_color  = grade_colors.get(grade, "#6c757d")
+            st.markdown(
+                f"""<div style="background:{grade_color};color:{'black' if grade=='C' else 'white'};
+                padding:18px 24px;border-radius:12px;margin-bottom:16px;">
+                <span style="font-size:2em;font-weight:bold">Grade {grade}</span>
+                &nbsp;&nbsp;
+                <span style="font-size:1.3em">{company_val} ({ticker_val})</span>
+                &nbsp;&nbsp;|&nbsp;&nbsp;
+                <span style="font-size:1.2em">Score: {score}/15</span>
+                &nbsp;&nbsp;|&nbsp;&nbsp;
+                <span style="font-size:1.2em">{rec}</span>
+                </div>""",
+                unsafe_allow_html=True,
+            )
 
-            with col2:
-                st.metric("Margin of Safety", f"{mos:.1f}%")
-                st.metric("Intrinsic Value (Est.)", f"${intrinsic_v:.2f}")
+            # ── Watchlist button ──────────────────────────────────────────
+            if ticker_val:
+                on_wl = is_on_watchlist(user, ticker_val)
+                wl_label = "★ Remove from Watchlist" if on_wl else "☆ Add to Watchlist"
+                if st.button(wl_label, key="wl_btn_phase3"):
+                    if on_wl:
+                        remove_from_watchlist(user, ticker_val)
+                    else:
+                        add_to_watchlist(user, ticker_val, company_val)
+                    st.rerun()
 
-            with col3:
-                st.subheader("Defensive Checklist")
-                for item in checklist:
-                    st.write(item)
+            # ── Section 1: Growth Rates ───────────────────────────────────
+            st.markdown("#### 1. Growth Rates")
+            g1, g2, g3 = st.columns(3)
+            with g1:
+                rv = a['revenue_growth_pct']
+                st.metric("Revenue Growth", _na(rv, ".1f", "%"),
+                          delta=f"{rv:+.1f}%" if rv is not None else None)
+            with g2:
+                pg = a['profit_growth_pct']
+                st.metric("Profit Growth", _na(pg, ".1f", "%"),
+                          delta=f"{pg:+.1f}%" if pg is not None else None)
+            with g3:
+                eg = a['eps_growth_pct']
+                st.metric("EPS Growth", _na(eg, ".1f", "%"),
+                          delta=f"{eg:+.1f}%" if eg is not None else None)
 
-            st.subheader("Saved Financial Data")
-            df_display = pd.DataFrame([data]).T.rename(columns={0: "Value"})
-            st.dataframe(df_display, use_container_width=True)
+            # ── Section 2: Valuation & Profitability ─────────────────────
+            st.markdown("#### 2 & 3. Valuation & Profitability Ratios")
+            v1, v2, v3, v4, v5, v6, v7 = st.columns(7)
+            with v1: st.metric("P/E Ratio",     _na(a['pe'], ".1f"))
+            with v2: st.metric("P/B Ratio",     _na(a['pb'], ".2f"))
+            with v3: st.metric("P/CF Ratio",    _na(a['pcf'], ".1f"))
+            with v4: st.metric("ROE",           _na(a['roe'], ".1f", "%"))
+            with v5: st.metric("ROA",           _na(a['roa'], ".1f", "%"))
+            with v6: st.metric("Current Ratio", _na(a['current_ratio'], ".2f"))
+            with v7: st.metric("Debt/Equity",   _na(a['de'], ".2f"))
+
+            # ── Section 4: Dividend ───────────────────────────────────────
+            st.markdown("#### 4. Dividend Metrics")
+            d1, d2 = st.columns(2)
+            with d1: st.metric("Dividend Yield",  _na(a['div_yield'], ".1f", "%"))
+            with d2: st.metric("Payout Ratio",    _na(a['payout_ratio'], ".1f", "%"))
+
+            # ── Section 5: Graham Score Table ─────────────────────────────
+            st.markdown("#### 5. Graham Score Table (max 15 pts)")
+            score_df = pd.DataFrame(a['score_table'])[["Criterion", "Value", "Points", "Score"]]
+            st.dataframe(
+                score_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Score": st.column_config.ProgressColumn("Score", max_value=3, format="%d"),
+                },
+            )
+            st.markdown(f"**Total: {score}/15 — Grade {grade}**")
+
+            # ── Section 6: Margin of Safety ───────────────────────────────
+            st.markdown("#### 6. Margin of Safety (Sri Lanka Formula)")
+            m1, m2, m3, m4 = st.columns(4)
+            with m1: st.metric("Intrinsic Value (LKR)", f"{a['intrinsic_value']:.2f}",
+                                help="EPS × 7.4  (g=5%, Y=11%)")
+            with m2: st.metric("Market Price (LKR)",    f"{a['market_price']:.2f}" if a['market_price'] > 0 else "N/A")
+            with m3: st.metric("Margin of Safety",      f"{a['mos_pct']:.1f}%")
+            with m4: st.metric("Max Buy Price (30% MOS)", f"{a['max_buy_price']:.2f}")
+            st.info(f"MOS Grade: **{a['mos_grade']}**")
+
+            # ── Section 7: Defensive Investor Checklist ───────────────────
+            st.markdown("#### 7. Defensive Investor Checklist")
+            def_df = pd.DataFrame(a['defensive_checklist'])[["Criterion", "Condition", "Result"]]
+            st.dataframe(def_df, use_container_width=True, hide_index=True)
+            passes = a['defensive_passes']
+            st.markdown(
+                f"**{passes}/5 criteria met — {a['defensive_verdict']}** "
+                f"({'Passes' if passes >= 4 else 'Fails'} Defensive Investor test)"
+            )
+
+            # ── Section 8: Final Recommendation ──────────────────────────
+            st.markdown("#### 8. Final Recommendation")
+            buy = a['buy_decision']
+            buy_color = (
+                "#1e7e34" if "YES" in buy else
+                "#ffc107" if "HOLD" in buy else
+                "#dc3545"
+            )
+            buy_text_color = "black" if "HOLD" in buy else "white"
+            alloc_lkr = a['allocation_pct'] / 100 * 50000
+            st.markdown(
+                f"""<div style="background:{buy_color};color:{buy_text_color};
+                padding:16px;border-radius:10px;margin-bottom:12px;">
+                <b style="font-size:1.3em">{buy}</b><br>
+                Graham Grade: <b>{grade}</b> &nbsp;|&nbsp;
+                Max Buy Price: <b>LKR {a['max_buy_price']:.2f}</b> &nbsp;|&nbsp;
+                Allocation: <b>{a['allocation_pct']}% of LKR 50,000 = LKR {alloc_lkr:,.0f}</b>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+
+            # ── Section 9: Bottom Line ────────────────────────────────────
+            st.markdown("#### 9. Bottom Line")
+            st.info(a['bottom_line'])
 
     # ── TAB 2: 5-YEAR TRENDS ──────────────────────────────────
     with tabs[1]:

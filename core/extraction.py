@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _DATA_PROMPT = """Analyze this financial report and extract the metrics below.
 Search the ENTIRE document — check financial highlights, per share data, investor information,
-and balance sheets, not just the income statement.
+balance sheets, cash flow statements, and five/ten-year summaries.
 If a value is not stated directly, DERIVE it using the formula in the description.
 Only use 0 if the value genuinely cannot be found or calculated.
 Return ONLY valid JSON, no markdown, no extra text.
@@ -27,16 +27,31 @@ Return ONLY valid JSON, no markdown, no extra text.
   "company_name": "Full legal company name from cover or header",
   "ticker": "Stock ticker/symbol. Check: cover page, investor info, stock exchange listing, share data table. For Sri Lankan companies check CSE listing.",
   "fiscal_year": "Financial year end year as YYYY",
-  "revenue": "For normal companies: total revenue/turnover in millions. For banks: Net Interest Income + Non-Interest Income (total operating income) in millions.",
-  "net_income": "Profit after tax / Net profit for the year in millions.",
-  "eps": "Earnings Per Share — find in Per Share Data table, Financial Highlights, or Five/Ten-Year Summary. Also labelled Basic EPS or Diluted EPS.",
-  "roe": "Return on Equity %. Find in Financial Ratios, KPIs, or Financial Highlights. If not stated, calculate as (Net Income / Average Shareholders Equity) x 100.",
-  "debt_to_equity": "Total Liabilities / Total Equity from the balance sheet. For banks this is typically 8-15. Calculate from balance sheet if not stated.",
-  "pe_ratio": "Price to Earnings ratio. Find in Investor Information, Share Data, Capital Market Information, or Financial Highlights. Use 0 only if completely absent.",
-  "pb_ratio": "Price to Book Value ratio. Find in Investor Information, Share Data, or Financial Highlights. Also labelled Market Price to Book Value or P/BV. Use 0 only if completely absent.",
-  "earnings_growth_5yr": "5-year earnings growth %. Find in Five/Ten-Year financial summary. Calculate as ((Latest EPS / EPS 5 years ago)^(1/5) - 1) x 100. Use 0 if only 1 year available.",
-  "current_assets": "For normal companies: current assets in millions. For banks: total assets due within 1 year, or total assets if not broken down by maturity.",
-  "current_liabilities": "For normal companies: current liabilities in millions. For banks: total liabilities due within 1 year, or total deposits + short-term borrowings.",
+
+  "revenue": "CURRENT YEAR: total revenue/turnover in millions. For banks: Net Interest Income + Non-Interest Income in millions.",
+  "revenue_prev": "PREVIOUS YEAR comparative revenue in millions from the same income statement column.",
+  "net_income": "CURRENT YEAR: Profit after tax attributable to equity holders in millions.",
+  "net_income_prev": "PREVIOUS YEAR comparative profit after tax in millions from the same income statement column.",
+  "eps": "CURRENT YEAR Basic EPS. Find in Per Share Data, Financial Highlights, or Five/Ten-Year Summary.",
+  "eps_prev": "PREVIOUS YEAR Basic EPS from comparative column or five-year summary.",
+
+  "total_assets": "Total assets from balance sheet in millions.",
+  "total_equity": "Total equity / shareholders funds / net assets in millions from balance sheet.",
+  "total_liabilities": "Total liabilities in millions from balance sheet. If not stated, calculate as Total Assets minus Total Equity.",
+
+  "current_assets": "For normal companies: current assets in millions. For banks: liquid assets or assets due within 1 year.",
+  "current_liabilities": "For normal companies: current liabilities in millions. For banks: total deposits + short-term borrowings.",
+
+  "operating_cash_flow": "Net cash generated from / used in operating activities from statement of cash flows in millions.",
+  "shares_outstanding": "Weighted average number of ordinary shares in millions. Find in EPS note, per share data, or capital section.",
+  "market_price": "Year-end closing market price per share in LKR. Find in investor information, capital market data, or share data section.",
+  "dividend_per_share": "Dividends per share declared or paid this year in LKR. Find in per share data or investor information.",
+
+  "roe": "Return on Equity %. Find in Financial Ratios or Financial Highlights. Calculate as (Net Income / Average Shareholders Equity) x 100 if not stated.",
+  "debt_to_equity": "Total Liabilities / Total Equity. Calculate from balance sheet if not stated.",
+  "pe_ratio": "Price to Earnings ratio. Find in Investor Information, Share Data, or Financial Highlights. Use 0 only if completely absent.",
+  "pb_ratio": "Price to Book Value ratio. Find in Investor Information or Financial Highlights. Use 0 only if completely absent.",
+  "earnings_growth_5yr": "5-year EPS CAGR %. Calculate as ((Latest EPS / EPS 5 years ago)^(1/5) - 1) x 100. Use 0 if only 1 year available.",
   "dividend_paid": "Yes if any dividend was declared or paid this financial year, No otherwise.",
   "intrinsic_value": "Stated intrinsic or fair value per share if mentioned, otherwise 0."
 }"""

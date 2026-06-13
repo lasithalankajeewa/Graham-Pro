@@ -18,7 +18,7 @@ from core.db import (
     check_and_fire_alerts_for_ticker,
 )
 from core.extraction import extract_with_openrouter
-from core.scoring import calculate_graham_score
+from core.scoring import calculate_full_analysis, calculate_graham_score
 from pipeline.cse_fetcher import (
     download_pdf,
     fetch_announcements,
@@ -90,13 +90,19 @@ def run_pipeline(
             if not raw.get("fiscal_year"):
                 raw["fiscal_year"] = fiscal_year
 
-            score, rec, _, mos, _ = calculate_graham_score(raw)
+            analysis = calculate_full_analysis(raw)
+            score = analysis["graham_score"]
+            rec   = analysis["recommendation"]
+            mos   = analysis["mos_pct"]
+
+            # Merge full analysis into stored data so it's available in the UI
+            merged = {**raw, "_analysis": analysis}
 
             analysis_id = save_analysis(
                 username=PIPELINE_USER,
                 company=company,
                 ticker=ticker,
-                data=raw,
+                data=merged,
                 score=score,
                 rec=rec,
                 source="auto",
