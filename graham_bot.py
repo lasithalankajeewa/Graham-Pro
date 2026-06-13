@@ -7,15 +7,19 @@ import json
 import re
 import smtplib
 import requests
+import hmac as _hmac
+import hashlib as _hashlib
+import time as _time
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import google.generativeai as genai
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from pypdf import PdfReader, PdfWriter
+import extra_streamlit_components as stx
 
 # --- CONFIGURATION ---
 # On Streamlit Cloud secrets are stored in st.secrets, not in a .env file.
@@ -204,6 +208,43 @@ for key, default in [('logged_in', False), ('user', None), ('last_analysis', Non
 init_db()
 
 # ============================================================
+# PERSISTENT SESSION (cookie-based)
+# ============================================================
+_COOKIE_NAME = "graham_session"
+_SESSION_TTL = 7 * 86400  # 7 days
+
+
+def _make_session_token(username: str) -> str:
+    ts = str(int(_time.time()))
+    sig = _hmac.new(SECRET_KEY.encode(), f"{username}|{ts}".encode(), _hashlib.sha256).hexdigest()
+    return f"{username}|{ts}|{sig}"
+
+
+def _verify_session_token(token: str) -> str | None:
+    try:
+        username, ts, sig = token.split("|", 2)
+        if _time.time() - int(ts) > _SESSION_TTL:
+            return None
+        expected = _hmac.new(SECRET_KEY.encode(), f"{username}|{ts}".encode(), _hashlib.sha256).hexdigest()
+        if not _hmac.compare_digest(sig, expected):
+            return None
+        return username
+    except Exception:
+        return None
+
+
+_cm = stx.CookieManager(key="graham_cm")
+
+# Restore session from cookie on every page load (including refresh)
+if not st.session_state.logged_in:
+    _saved_token = _cm.get(_COOKIE_NAME)
+    if _saved_token:
+        _restored_user = _verify_session_token(_saved_token)
+        if _restored_user:
+            st.session_state.logged_in = True
+            st.session_state.user = _restored_user
+
+# ============================================================
 # SIDEBAR
 # ============================================================
 with st.sidebar:
@@ -219,6 +260,8 @@ with st.sidebar:
                 if user and check_password(password_input, user[1]):
                     st.session_state.logged_in = True
                     st.session_state.user = username_input
+                    _cm.set(_COOKIE_NAME, _make_session_token(username_input),
+                            expires_at=datetime.now() + timedelta(days=7))
                     st.rerun()
                 else:
                     st.error("Invalid credentials")
@@ -231,6 +274,7 @@ with st.sidebar:
     else:
         st.success(f"Welcome, {st.session_state.user}!")
         if st.button("Logout"):
+            _cm.delete(_COOKIE_NAME)
             st.session_state.logged_in = False
             st.session_state.user = None
             st.session_state.last_analysis = None
@@ -649,14 +693,16 @@ else:
     # ── TAB 2: 5-YEAR TRENDS ──────────────────────────────────
     with tabs[1]:
         st.subheader("5-Year Financial Trends")
-        history_df = get_history(user, include_auto=True)
+        with st.spinner("Loading history…"):
+            history_df = get_history(user, include_auto=True)
         if history_df.empty:
             st.info("No analysis history yet. Upload reports to start tracking trends.")
         else:
             tickers = sorted(history_df['ticker'].unique().tolist())
             selected_ticker = st.selectbox("Select Company", tickers, key="trend_ticker")
             company_label = history_df[history_df['ticker'] == selected_ticker]['company_name'].iloc[-1]
-            trend_df = get_ticker_trend_data(user, selected_ticker)
+            with st.spinner(f"Loading trend data for {selected_ticker}…"):
+                trend_df = get_ticker_trend_data(user, selected_ticker)
 
             if trend_df.empty:
                 st.info("No parseable data for this ticker.")
@@ -728,7 +774,8 @@ else:
     # ── TAB 3: WATCHLIST ──────────────────────────────────────
     with tabs[2]:
         st.subheader("My Watchlist")
-        watchlist_items = get_watchlist_with_scores(user)
+        with st.spinner("Loading watchlist…"):
+            watchlist_items = get_watchlist_with_scores(user)
 
         if not watchlist_items:
             st.info("Your watchlist is empty. Run an analysis then click 'Add to Watchlist'.")
@@ -778,7 +825,8 @@ else:
         st.subheader("Price & Score Alerts")
 
         with st.expander("➕ Add New Alert", expanded=True):
-            all_tickers_df = get_history(user, include_auto=True)
+            with st.spinner("Loading tickers…"):
+                all_tickers_df = get_history(user, include_auto=True)
             ticker_choices = sorted(all_tickers_df['ticker'].unique().tolist()) if not all_tickers_df.empty else []
 
             col_a, col_b = st.columns(2)
@@ -853,7 +901,8 @@ else:
     with tabs[4]:
         st.subheader("Analysis History")
         show_auto = st.checkbox("Include auto-analyzed reports (pipeline)", value=True, key="hist_show_auto")
-        history_df = get_history(user, include_auto=show_auto)
+        with st.spinner("Loading records…"):
+            history_df = get_history(user, include_auto=show_auto)
 
         if history_df.empty:
             st.info("No analysis records found.")
