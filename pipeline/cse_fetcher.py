@@ -1,22 +1,37 @@
 """
 CSE announcement fetcher.
 Uses the public CSE API (no auth required).
+
+Actual API response shape (field names differ from docs):
+  { "reqFinancialAnnouncemnets": [   ← note typo in key
+      {
+        "id": 51873,
+        "path": "cmt/upload_report_file/2352_1781262197673.pdf",
+        "manualDate": 1767119400000,
+        "uploadedDate": "12 Jun 2026 04:33:17 PM",
+        "fileText": "Annual Report as at 31st March 2026",
+        "name": "HAYCARB PLC",
+        "symbol": "HAYC",
+        "logoUrl": "...",
+        "authorizedDate": "..."
+      }, ...
+  ]}
+PDF URL = https://cdn.cse.lk/{path}
 """
 import logging
 import os
-import tempfile
 
 import requests
 
 log = logging.getLogger(__name__)
 
 CSE_API_URL = "https://www.cse.lk/api/getFinancialAnnouncement"
-PDF_CDN = "https://cdn.cse.lk/cmt/upload_report_file/{fileName}"
+PDF_CDN_BASE = "https://cdn.cse.lk/"
 
 _REPORT_KEYWORDS = [
     "annual report",
     "financial statements",
-    "interim",
+    "interim financial",
     "quarterly",
     "audited financial",
     "unaudited financial",
@@ -28,13 +43,12 @@ def fetch_announcements(page: int = 1, page_size: int = 100) -> list[dict]:
     try:
         resp = requests.post(
             CSE_API_URL,
-            data={"page": page, "pageSize": page_size},
+            json={"page": page, "pageSize": page_size},
             timeout=30,
         )
         resp.raise_for_status()
-        data = resp.json()
-        # API returns {"reqStatus": "SUCCESS", "responseObject": [...]}
-        items = data.get("responseObject") or []
+        # API key has a typo: "reqFinancialAnnouncemnets"
+        items = resp.json().get("reqFinancialAnnouncemnets") or []
         if not isinstance(items, list):
             log.warning("Unexpected CSE API response shape: %s", type(items))
             return []
@@ -46,45 +60,41 @@ def fetch_announcements(page: int = 1, page_size: int = 100) -> list[dict]:
 
 
 def filter_reports(announcements: list[dict]) -> list[dict]:
-    """Keep only financial-statement announcements that carry a PDF."""
+    """Keep only financial-statement announcements that carry a PDF path."""
     results = []
     for item in announcements:
-        title = (item.get("announcementTitle") or "").lower()
-        category = (item.get("categoryType") or "").lower()
-        file_name = item.get("fileName") or ""
-        if not file_name:
+        title = (item.get("fileText") or "").lower()
+        path = item.get("path") or ""
+        if not path or not path.endswith(".pdf"):
             continue
-        combined = title + " " + category
-        if any(kw in combined for kw in _REPORT_KEYWORDS):
+        if any(kw in title for kw in _REPORT_KEYWORDS):
             results.append(item)
     log.info("%d / %d announcements are financial reports", len(results), len(announcements))
     return results
 
 
 def get_pdf_url(announcement: dict) -> str:
-    file_name = announcement.get("fileName", "")
-    return PDF_CDN.format(fileName=file_name)
+    path = announcement.get("path", "")
+    return PDF_CDN_BASE + path
 
 
 def get_report_metadata(announcement: dict) -> dict:
     """Extract ticker, company name, report type, and fiscal year from raw announcement."""
-    title = announcement.get("announcementTitle") or ""
-    company = announcement.get("companyName") or announcement.get("company") or ""
-    ticker = announcement.get("symbol") or announcement.get("ticker") or ""
-    category = (announcement.get("categoryType") or "").lower()
+    title = (announcement.get("fileText") or "").lower()
+    company = announcement.get("name") or ""
+    ticker = announcement.get("symbol") or ""
 
-    if "annual" in category or "annual" in title.lower():
+    if "annual" in title:
         report_type = "annual"
-    elif "interim" in category or "quarterly" in category:
+    elif "interim" in title or "quarterly" in title or "quarter" in title:
         report_type = "quarterly"
     else:
         report_type = "financial"
 
-    # Fiscal year: prefer explicit field, fall back to announcement date year
-    fiscal_year = str(announcement.get("fiscalYear") or "")
-    if not fiscal_year:
-        date_str = announcement.get("announcementDate") or announcement.get("date") or ""
-        fiscal_year = date_str[:4] if date_str else ""
+    # Extract year from title e.g. "Annual Report as at 31st March 2026" → "2026"
+    import re
+    years = re.findall(r'\b(20\d{2})\b', announcement.get("fileText") or "")
+    fiscal_year = years[-1] if years else ""
 
     return {
         "ticker": ticker.upper(),
@@ -99,9 +109,6 @@ def download_pdf(pdf_url: str, dest_path: str) -> bool:
     try:
         resp = requests.get(pdf_url, stream=True, timeout=60)
         resp.raise_for_status()
-        content_type = resp.headers.get("Content-Type", "")
-        if "pdf" not in content_type and not pdf_url.endswith(".pdf"):
-            log.warning("Unexpected Content-Type '%s' for %s", content_type, pdf_url)
         with open(dest_path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=65536):
                 f.write(chunk)
