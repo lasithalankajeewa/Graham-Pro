@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(curl -s -X POST https://www.cse.lk/api/getFinancialAnnouncement -H 'Content-Type: application/json' -d '{\"page\":1,\"pageSize\":100}')",
+      "Bash(python3 -m json.tool)",
+      "Bash(curl -s -X GET https://www.cse.lk/api/getListedCompanies -H 'Content-Type: application/json')",
+      "Bash(curl -s -X GET https://www.cse.lk/api/getCompanyProfile?symbol=ABAN -H 'Content-Type: application/json')",
+      "PowerShell($response = Invoke-WebRequest -Uri \"https://www.cse.lk/api/getFinancialAnnouncement\" -Method POST -Headers @{\"Content-Type\"=\"application/json\"} -Body '{\"page\":1,\"pageSize\":100}' -UseBasicParsing; $response.Content | ConvertFrom-Json | ConvertTo-Json -Depth 10 | Select-Object -First 150)",
+      "PowerShell($response = Invoke-WebRequest -Uri \"https://www.cse.lk/api/getCompanyProfile\" -Method GET -Headers @{\"Content-Type\"=\"application/json\"} -UseBasicParsing; $response.StatusCode; $response.Content)",
+      "PowerShell($response = Invoke-WebRequest -Uri \"https://www.cse.lk/api/getCompanyProfile?symbol=HAYC\" -Method GET -Headers @{\"Content-Type\"=\"application/json\"} -UseBasicParsing; $response.StatusCode; $response.Content | ConvertFrom-Json | ConvertTo-Json -Depth 10)",
+      "PowerShell($response = Invoke-WebRequest -Uri \"https://www.cse.lk/api/getListedCompanies\" -Method GET -Headers @{\"Content-Type\"=\"application/json\"} -UseBasicParsing; $response.StatusCode; $response.Content | Select-Object -First 500)",
+      "PowerShell($response = Invoke-WebRequest -Uri \"https://www.cse.lk/api/getCompanyProfile\" -Method POST -Headers @{\"Content-Type\"=\"application/json\"} -Body '{\"symbol\":\"HAYC\"}' -UseBasicParsing; $response.StatusCode; $response.Content | ConvertFrom-Json | ConvertTo-Json -Depth 15)",
+      "PowerShell($response = Invoke-WebRequest -Uri \"https://www.cse.lk/api/getListedCompanies\" -Method POST -Headers @{\"Content-Type\"=\"application/json\"} -Body '{}' -UseBasicParsing; $response.StatusCode; $response.Content | ConvertFrom-Json | ConvertTo-Json -Depth 10 | Select-Object -First 200)"
+    ]
+  }
+}
