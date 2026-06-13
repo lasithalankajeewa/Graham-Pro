@@ -402,18 +402,7 @@ else:
             if not ok:
                 st.error("PDF download failed. Check the URL and try again.")
                 return
-            with st.spinner(f"Locating financial statements in {ticker} PDF…"):
-                # Pre-check: page detection only (no API call) to verify PDF is readable
-                try:
-                    from pypdf import PdfReader as _PdfReader
-                    from core.extraction import _find_relevant_pages as _frp
-                    with open(tmp_path, 'rb') as _f:
-                        _rdr = _PdfReader(_f)
-                        page_map, _ = _frp(_rdr, allow_gemini_toc=False)
-                    _pg_ok = True
-                except Exception:
-                    _pg_ok = False
-            with st.spinner(f"Sending {ticker} financial pages to AI for extraction… (30–90 s)"):
+            with st.spinner(f"Sending {ticker} financial pages to AI… (30–90 s)"):
                 raw, page_map = _extract_with_openrouter_headless(tmp_path, model_id, OPENROUTER_API_KEY)
         finally:
             if tmp_path and _os.path.exists(tmp_path):
@@ -422,15 +411,13 @@ else:
         if raw is None:
             if page_map and page_map.get("total_pages"):
                 st.warning(
-                    f"✅ PDF is readable ({page_map['total_pages']} pages, "
-                    f"{len(page_map.get('pages_sent', []))} financial pages found) — "
-                    f"but the **AI API call failed**."
+                    f"✅ PDF is readable — {page_map['total_pages']} pages, "
+                    f"{len(page_map.get('pages_sent', []))} financial pages found — "
+                    f"but the AI API call failed."
                 )
             st.error(
-                "**Extraction failed.** Possible causes:\n\n"
-                "- Free model temporarily unavailable → **wait 30 seconds and try again**\n"
-                "- Rate limit hit → try again or **select a different model**\n"
-                "- PDF contains only scanned images (no text layer)"
+                "**Extraction failed.** The API key was likely the issue. "
+                "If you have updated your key, reload the app and try again."
             )
             return
 
