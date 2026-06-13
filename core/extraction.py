@@ -119,18 +119,25 @@ def _parse_json_response(text):
 # ---------------------------------------------------------------------------
 
 def detect_page_offset(reader, max_scan=20):
-    # Fix 4: try pypdf page labels first (most reliable)
+    # Try pypdf page labels — but only when they are NOT trivially sequential from 1
+    # (many PDFs set labels = 1,2,3... for the whole doc which gives a wrong offset of 0)
     try:
         labels = list(reader.page_labels)
-        for i, label in enumerate(labels):
-            if label and str(label).isdigit():
-                n = int(label)
-                if 1 <= n <= 10:
-                    return i - (n - 1)
+        # Detect "trivially sequential" labels: first 5 are '1','2','3','4','5'
+        trivial = all(
+            i < len(labels) and labels[i] == str(i + 1)
+            for i in range(min(5, len(labels)))
+        )
+        if not trivial:
+            for i, label in enumerate(labels):
+                if label and str(label).isdigit():
+                    n = int(label)
+                    if 1 <= n <= 10:
+                        return i - (n - 1)
     except Exception:
         pass
 
-    # Fall back to heuristic: look for small digit in top/bottom lines
+    # Heuristic: scan page text for standalone small page number (skip first 3 pages)
     for i in range(min(max_scan, len(reader.pages))):
         text = reader.pages[i].extract_text() or ""
         lines = [l.strip() for l in text.strip().split('\n') if l.strip()]
@@ -139,22 +146,43 @@ def detect_page_offset(reader, max_scan=20):
             if line.isdigit():
                 n = int(line)
                 if 1 <= n <= 8:
-                    return i - (n - 1)
+                    offset = i - (n - 1)
+                    if offset >= 0:  # sanity check: offset can't be negative
+                        return offset
     return 0
 
 
 def _find_toc_page_indices(reader, max_scan=30):
     total = len(reader.pages)
     found = []
+
+    # Approach 1: explicit TOC heading (must be a short standalone line, not a sentence)
     for i in range(min(max_scan, total)):
         text = reader.pages[i].extract_text() or ""
         lines = [l.strip() for l in text.split('\n') if l.strip()]
         for line in lines[:20]:
-            if len(line) <= 60 and _TOC_HEADING_RE.search(line):
-                for j in range(i, min(i + 3, total)):
+            # ≤30 chars ensures it's a heading not a sentence fragment like "its contents."
+            if len(line) <= 30 and _TOC_HEADING_RE.search(line):
+                for j in range(i, min(i + 4, total)):
                     if j not in found:
                         found.append(j)
                 break
+
+    # Approach 2: structural detection — pages with many "NNN Section Name" lines
+    # Catches "What's Inside", "At a Glance", or any unlabelled TOC page
+    if not found:
+        for i in range(min(max_scan, total)):
+            text = reader.pages[i].extract_text() or ""
+            lines = [l.strip() for l in text.split('\n') if l.strip()]
+            toc_style = sum(
+                1 for l in lines
+                if re.match(r'^\d{1,3}\s{1,4}[A-Z]', l) and len(l) < 80
+            )
+            if toc_style >= 4:
+                for j in range(i, min(i + 3, total)):
+                    if j not in found:
+                        found.append(j)
+
     if found:
         return sorted(found), True
     return list(range(min(10, total))), False
