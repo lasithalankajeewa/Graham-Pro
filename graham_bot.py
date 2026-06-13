@@ -87,6 +87,7 @@ from core.db import (
     init_db, hash_password, check_password,
     add_user, get_user,
     save_analysis, get_history, get_ticker_trend_data, calculate_cagr,
+    update_analysis_market_price,
     add_to_watchlist, remove_from_watchlist, is_on_watchlist, get_watchlist_with_scores,
     add_alert, get_alerts, delete_alert,
     check_and_fire_alerts,
@@ -263,6 +264,12 @@ else:
         def _na(v, fmt=".1f", suffix=""):
             if v is None: return "N/A"
             return f"{v:{fmt}}{suffix}"
+
+        if not a.get('market_price'):
+            st.warning(
+                "⚠️ **Market price not available** — P/E, P/B, P/CF and Margin of Safety "
+                "cannot be computed. Enter the current market price below the analysis to recalculate."
+            )
 
         grade = a['graham_grade']
         score = a['graham_score']
@@ -870,8 +877,43 @@ else:
                 st.caption(f"Analyzed: {row['date']}  ·  Source: {row.get('source', 'manual')}")
                 try:
                     data = json.loads(row['data_json']) if isinstance(row['data_json'], str) else row['data_json']
-                    # Use cached _analysis if present, otherwise recompute
-                    a = data.get('_analysis') or calculate_full_analysis(data)
+                    analysis_id = int(row['id']) if 'id' in row.index else None
+
+                    # ── Market price input (shown when price is missing) ──────
+                    stored_price = float(data.get('market_price') or 0)
+                    price_key = f"hist_price_{idx}"
+                    if price_key not in st.session_state:
+                        st.session_state[price_key] = stored_price
+
+                    if stored_price == 0:
+                        st.info(
+                            "**Market price not in this report.** "
+                            "Enter the current CSE market price to compute P/E, P/B, and Margin of Safety."
+                        )
+                        mp_col, btn_col = st.columns([3, 1])
+                        with mp_col:
+                            entered_price = st.number_input(
+                                "Current Market Price (LKR)",
+                                min_value=0.0, step=0.10, format="%.2f",
+                                value=st.session_state[price_key],
+                                key=f"hist_price_input_{idx}",
+                            )
+                        with btn_col:
+                            st.markdown("<br>", unsafe_allow_html=True)
+                            if st.button("Save Price", key=f"hist_save_price_{idx}",
+                                         disabled=(entered_price <= 0 or analysis_id is None)):
+                                if update_analysis_market_price(analysis_id, entered_price):
+                                    st.session_state[price_key] = entered_price
+                                    st.success(f"Saved LKR {entered_price:.2f} — analysis updated.")
+                                    st.rerun()
+                                else:
+                                    st.error("Could not update database record.")
+                        # Apply entered price to live computation
+                        if entered_price > 0:
+                            data = {**data, 'market_price': entered_price}
+
+                    # Recompute with latest data (uses saved or entered price)
+                    a = calculate_full_analysis(data)
                     _render_analysis_report(
                         a,
                         str(row['ticker']),
