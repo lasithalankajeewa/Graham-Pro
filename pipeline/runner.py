@@ -99,6 +99,15 @@ def run_pipeline(
             if not raw.get("fiscal_year"):
                 raw["fiscal_year"] = fiscal_year
 
+            # Prefer the latest live CSE price over the PDF's (often stale) market price,
+            # so P/E, P/B, and MOS reflect today's market, not the report's year-end price.
+            from core.db import get_latest_price
+            live = get_latest_price(ticker)
+            if live:
+                log.info("  → overriding market_price %.2f with live price %.2f (as of %s)",
+                          raw.get("market_price") or 0, live["price"], live["recorded_at"])
+                raw["market_price"] = live["price"]
+
             analysis = calculate_full_analysis(raw)
             score = analysis["graham_score"]
             rec   = analysis["recommendation"]
@@ -159,13 +168,16 @@ def run_price_check() -> dict:
     Runs independently of report extraction — no OpenRouter key needed.
     """
     from core.cse_market import get_live_prices
-    from core.db import fire_price_alerts
+    from core.db import fire_price_alerts, record_price_history
 
     stats = {"alerts_fired": 0}
     live_prices = get_live_prices()
     if not live_prices:
         log.warning("Price check: no live prices fetched — aborting")
         return stats
+
+    record_price_history(live_prices)
+    log.info("Recorded %d price snapshots to price_history", len(live_prices))
 
     fired = fire_price_alerts(live_prices)
     stats["alerts_fired"] = len(fired)

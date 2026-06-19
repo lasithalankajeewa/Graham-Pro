@@ -105,6 +105,13 @@ def init_db():
                             processed_at TIMESTAMPTZ DEFAULT NOW(),
                             analysis_id INTEGER)""")
 
+        # price_history — live price snapshots for future trend analysis / prediction
+        cur.execute("""CREATE TABLE IF NOT EXISTS price_history
+                       (id INTEGER PRIMARY KEY """ + ("AUTOINCREMENT" if ph == "?" else "GENERATED ALWAYS AS IDENTITY") + """,
+                        ticker TEXT NOT NULL, price REAL NOT NULL, recorded_at TEXT NOT NULL)""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_price_history_ticker_time "
+                    "ON price_history (ticker, recorded_at)")
+
         # Migrate existing analysis table to add source column if missing
         if ph == "?":
             cols = [row[1] for row in cur.execute("PRAGMA table_info(analysis)").fetchall()]
@@ -450,6 +457,43 @@ def fire_price_alerts(live_prices: dict) -> list[str]:
                 )
             fired.append(f"price_below {ticker} → {alert['email']}")
     return fired
+
+
+# ---------------------------------------------------------------------------
+# Price history
+# ---------------------------------------------------------------------------
+
+def get_latest_price(ticker: str):
+    """Most recently recorded live price for a ticker, or None if never recorded."""
+    if not ticker:
+        return None
+    with _conn() as (con, ph):
+        cur = con.cursor()
+        cur.execute(
+            _sql("SELECT price, recorded_at FROM price_history WHERE ticker=? "
+                 "ORDER BY recorded_at DESC LIMIT 1", ph),
+            (ticker.upper(),),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        price, recorded_at = row[0], row[1]
+        return {"price": float(price), "recorded_at": recorded_at}
+
+
+def record_price_history(prices: dict):
+    """Bulk-insert a live price snapshot for every ticker fetched in a price-check run.
+    Builds a time series in `price_history` for future trend analysis / prediction."""
+    if not prices:
+        return
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rows = [(ticker, price, now) for ticker, price in prices.items()]
+    with _conn() as (con, ph):
+        cur = con.cursor()
+        cur.executemany(
+            _sql("INSERT INTO price_history (ticker, price, recorded_at) VALUES (?,?,?)", ph),
+            rows,
+        )
 
 
 # ---------------------------------------------------------------------------

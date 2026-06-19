@@ -16,7 +16,8 @@
       "PowerShell($response = Invoke-WebRequest -Uri \"https://www.cse.lk/api/getListedCompanies\" -Method POST -Headers @{\"Content-Type\"=\"application/json\"} -Body '{}' -UseBasicParsing; $response.StatusCode; $response.Content | ConvertFrom-Json | ConvertTo-Json -Depth 10 | Select-Object -First 200)",
       "Bash(python -m pipeline.main price-check)",
       "Bash(cd \"/d/Repos/Graham Pro\" && grep -i \"SMTP_USER\\\\|SMTP_PASSWORD\" .env)",
-      "Read(//d/d/Repos/Graham Pro/**)"
+      "Read(//d/d/Repos/Graham Pro/**)",
+      "Bash(python -c \"import ast; [ast.parse\\(open\\(f, encoding='utf-8'\\).read\\(\\), f\\) for f in ['core/db.py','pipeline/runner.py','graham_bot.py']]\")"
     ]
   }
 }

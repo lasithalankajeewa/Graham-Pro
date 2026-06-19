@@ -91,7 +91,7 @@ from core.db import (
     init_db, hash_password, check_password,
     add_user, get_user,
     save_analysis, get_history, get_ticker_trend_data, calculate_cagr,
-    update_analysis_market_price,
+    update_analysis_market_price, get_latest_price,
     add_to_watchlist, remove_from_watchlist, is_on_watchlist, get_watchlist_with_scores,
     add_alert, get_alerts, delete_alert,
     check_and_fire_alerts,
@@ -525,13 +525,21 @@ else:
                 st.error("⚠️ Ticker symbol was not found in the report. "
                          "Please enter it manually — it is required to track this company's history.")
 
+            ticker_default = _clean_ticker(raw.get('ticker'))
+            _live_price = get_latest_price(ticker_default) if ticker_default else None
+            if _live_price:
+                st.info(
+                    f"💡 Live CSE price for **{ticker_default}**: LKR {_live_price['price']:.2f} "
+                    f"(as of {_live_price['recorded_at']}) — pre-filled below instead of the "
+                    "report's (often stale) market price. Edit if needed before confirming."
+                )
+
             with st.form("edit_extracted_data"):
                 # ── Row 1: Company identity ───────────────────────────
                 c1, c2, c3 = st.columns([3, 2, 2])
                 with c1:
                     company_name = st.text_input("Company Name *", value=raw.get('company_name', ''))
                 with c2:
-                    ticker_default = _clean_ticker(raw.get('ticker'))
                     ticker = st.text_input(
                         "Ticker Symbol *" + ("  🔴 required" if ticker_missing else ""),
                         value=ticker_default, placeholder="e.g. SAMP, AAPL",
@@ -589,9 +597,11 @@ else:
                 st.markdown("##### Market Data & Dividends")
                 c15, c16, c17, c18 = st.columns(4)
                 with c15:
-                    market_price = st.number_input("Market Price (LKR)", value=_flt(raw.get('market_price')),
+                    _mp_default = _live_price['price'] if _live_price else _flt(raw.get('market_price'))
+                    market_price = st.number_input("Market Price (LKR)", value=_flt(_mp_default),
                                                    min_value=0.0, format="%.2f",
-                                                   help="Year-end closing price per share")
+                                                   help="Live CSE price if available, else the report's "
+                                                        "year-end closing price")
                 with c16:
                     shares_outstanding = st.number_input("Shares Outstanding (M)",
                                                          value=_flt(raw.get('shares_outstanding')),
@@ -955,29 +965,34 @@ else:
 
                     # ── Market price (always editable) ───────────────────────
                     stored_price = float(data.get('market_price') or 0)
-                    price_key = f"hist_price_{idx}"
-                    if price_key not in st.session_state:
-                        st.session_state[price_key] = stored_price
+                    widget_key = f"hist_price_input_{idx}"
+                    if widget_key not in st.session_state:
+                        st.session_state[widget_key] = stored_price
 
                     if stored_price == 0:
                         st.info(
                             "**Market price not in this report.** "
                             "Enter the current CSE market price to compute P/E, P/B, and Margin of Safety."
                         )
-                    mp_col, btn_col = st.columns([3, 1])
+                    _live = get_latest_price(str(row['ticker']))
+                    mp_col, live_col, btn_col = st.columns([3, 1, 1])
                     with mp_col:
                         entered_price = st.number_input(
                             "Current Market Price (LKR)",
                             min_value=0.0, step=0.10, format="%.2f",
-                            value=st.session_state[price_key],
-                            key=f"hist_price_input_{idx}",
+                            key=widget_key,
                         )
+                    with live_col:
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        if st.button(f"📡 Live: {_live['price']:.2f}" if _live else "📡 No live price",
+                                     key=f"hist_use_live_{idx}", disabled=not _live):
+                            st.session_state[widget_key] = _live['price']
+                            st.rerun()
                     with btn_col:
                         st.markdown("<br>", unsafe_allow_html=True)
                         if st.button("Update Price", key=f"hist_save_price_{idx}",
                                      disabled=(entered_price <= 0 or analysis_id is None)):
                             if update_analysis_market_price(analysis_id, entered_price):
-                                st.session_state[price_key] = entered_price
                                 st.success(f"Saved LKR {entered_price:.2f}")
                                 st.rerun()
                             else:
@@ -1041,6 +1056,18 @@ else:
                     help="Current market price per share — used for P/E, P/B and Margin of Safety",
                     key="cse_mktprice_in",
                 )
+
+            if _cse_ticker.strip():
+                _cse_live = get_latest_price(_cse_ticker.strip().upper())
+                if _cse_live:
+                    _lc_a, _lc_b = st.columns([3, 1])
+                    with _lc_a:
+                        st.caption(f"📡 Live CSE price: LKR {_cse_live['price']:.2f} "
+                                   f"(as of {_cse_live['recorded_at']})")
+                    with _lc_b:
+                        if st.button("Use Live Price", key="cse_use_live_btn"):
+                            st.session_state["cse_mktprice_in"] = _cse_live['price']
+                            st.rerun()
 
             _CSE_MODELS_TAB = {
                 "GPT-OSS 120B (Free)": "openai/gpt-oss-120b:free",
