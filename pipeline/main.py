@@ -21,22 +21,31 @@ log = logging.getLogger("pipeline.main")
 
 
 def main():
-    openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
-    if not openrouter_key:
-        log.error("OPENROUTER_API_KEY is not set — aborting")
-        sys.exit(1)
+    mode = sys.argv[1] if len(sys.argv) > 1 else "reports"
 
     database_url = os.getenv("DATABASE_URL", "")
     if not database_url:
         log.error("DATABASE_URL is not set — aborting")
         sys.exit(1)
 
-    # model used for ALL pipeline analyses
-    model_id = os.getenv("PIPELINE_MODEL") or "openai/gpt-oss-120b:free"
-
     log.info("Initializing database schema...")
     from core.db import init_db
     init_db()
+
+    if mode == "price-check":
+        log.info("Running price-only alert check...")
+        from pipeline.runner import run_price_check
+        stats = run_price_check()
+        log.info("Done. alerts_fired=%d", stats["alerts_fired"])
+        return
+
+    openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
+    if not openrouter_key:
+        log.error("OPENROUTER_API_KEY is not set — aborting")
+        sys.exit(1)
+
+    # model used for ALL pipeline analyses
+    model_id = os.getenv("PIPELINE_MODEL") or "openai/gpt-oss-120b:free"
 
     backfill_since = os.getenv("BACKFILL_SINCE") or None
 

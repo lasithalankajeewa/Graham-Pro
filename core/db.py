@@ -409,6 +409,49 @@ def _fire_alerts_for_rows(ticker, company_name, current_score, current_mos, user
     return fired
 
 
+def get_active_price_alerts() -> list[dict]:
+    """All active price_below alerts, across all users — for the daily price-check job."""
+    with _conn() as (con, ph):
+        cur = con.cursor()
+        cur.execute(
+            _sql("SELECT id, ticker, company_name, threshold, email, last_triggered "
+                 "FROM alerts WHERE alert_type='price_below' AND active=1", ph)
+        )
+        cols = ["id", "ticker", "company_name", "threshold", "email", "last_triggered"]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def fire_price_alerts(live_prices: dict) -> list[str]:
+    """Check all active price_below alerts against live prices. Fires at most once per day per alert."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    fired = []
+    for alert in get_active_price_alerts():
+        ticker = alert["ticker"].upper()
+        price = live_prices.get(ticker)
+        if price is None or price >= alert["threshold"]:
+            continue
+        if alert["last_triggered"] and alert["last_triggered"].startswith(today):
+            continue  # already fired today
+
+        subject = f"Graham-Bot: {ticker} Price LKR {price:.2f} — Below LKR {alert['threshold']:.2f}"
+        body = (
+            f"{alert['company_name']} ({ticker}) is now trading at LKR {price:.2f}, "
+            f"below your alert threshold of LKR {alert['threshold']:.2f}."
+        )
+        ok, _ = send_alert_email(
+            alert["email"], subject,
+            body + "\n\n---\nGraham-Bot | For educational purposes only.",
+        )
+        if ok:
+            with _conn() as (con, ph):
+                con.cursor().execute(
+                    _sql("UPDATE alerts SET last_triggered=? WHERE id=?", ph),
+                    (datetime.now().strftime("%Y-%m-%d %H:%M"), alert["id"]),
+                )
+            fired.append(f"price_below {ticker} → {alert['email']}")
+    return fired
+
+
 # ---------------------------------------------------------------------------
 # Pipeline deduplication
 # ---------------------------------------------------------------------------

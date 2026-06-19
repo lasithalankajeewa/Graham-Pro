@@ -292,6 +292,7 @@ ALERT_TYPE_LABELS = {
     "score_below": "Graham Score falls below X",
     "mos_above":   "Margin of Safety rises to or above X%",
     "mos_below":   "Margin of Safety falls below X%",
+    "price_below": "Market Price drops below LKR X",
 }
 
 if not st.session_state.logged_in:
@@ -849,6 +850,9 @@ else:
             with col_b:
                 if "score" in alert_type:
                     threshold = st.number_input("Score Threshold (0–15)", 0, 15, 9, key="alert_thresh")
+                elif alert_type == "price_below":
+                    threshold = st.number_input("Price Threshold (LKR)", min_value=0.0, value=100.0,
+                                                 step=1.0, key="alert_thresh_price")
                 else:
                     threshold = st.number_input("MOS Threshold (%)", -200, 200, 20, key="alert_thresh_mos")
                 alert_email = st.text_input("Send email to", placeholder="you@example.com", key="alert_email")
@@ -884,9 +888,12 @@ else:
                     c1, c2 = st.columns([5, 1])
                     with c1:
                         condition = ALERT_TYPE_LABELS.get(alert_row['alert_type'], alert_row['alert_type'])
-                        thresh_label = (f"{int(alert_row['threshold'])}"
-                                        if "score" in alert_row['alert_type']
-                                        else f"{alert_row['threshold']}%")
+                        if "score" in alert_row['alert_type']:
+                            thresh_label = f"{int(alert_row['threshold'])}"
+                        elif alert_row['alert_type'] == "price_below":
+                            thresh_label = f"LKR {alert_row['threshold']:.2f}"
+                        else:
+                            thresh_label = f"{alert_row['threshold']}%"
                         status = "🟢 Active" if alert_row['active'] else "⏸ Paused"
                         last_t = alert_row['last_triggered'] or "Never"
                         st.markdown(f"**{alert_row['ticker']}** — {alert_row['company_name']}")
@@ -895,7 +902,10 @@ else:
                         if st.button("Delete", key=f"del_alert_{alert_row['id']}"):
                             delete_alert(alert_row['id'])
                             st.rerun()
-            st.caption("💡 Alerts fire automatically every time you run an analysis for that company.")
+            st.caption(
+                "💡 Score/MOS alerts fire automatically every time a new report is analyzed. "
+                "Price alerts are checked against live CSE prices during market hours, independent of new reports."
+            )
 
     # ── TAB 5: HISTORY ────────────────────────────────────────
     with tabs[4]:

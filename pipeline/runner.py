@@ -152,3 +152,25 @@ def run_pipeline(
         stats["processed"], stats["skipped"], stats["failed"], stats["alerts_fired"],
     )
     return stats
+
+
+def run_price_check() -> dict:
+    """Daily/intraday price-only check: fetch live CSE prices, fire any due price_below alerts.
+    Runs independently of report extraction — no OpenRouter key needed.
+    """
+    from core.cse_market import get_live_prices
+    from core.db import fire_price_alerts
+
+    stats = {"alerts_fired": 0}
+    live_prices = get_live_prices()
+    if not live_prices:
+        log.warning("Price check: no live prices fetched — aborting")
+        return stats
+
+    fired = fire_price_alerts(live_prices)
+    stats["alerts_fired"] = len(fired)
+    if fired:
+        log.info("Price check fired %d alert(s): %s", len(fired), fired)
+    else:
+        log.info("Price check complete — no thresholds crossed")
+    return stats
