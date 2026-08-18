@@ -323,6 +323,8 @@ def _parse_toc_with_openrouter(toc_text, model_id, openrouter_key):
             json={
                 "model": model_id,
                 "messages": [{"role": "user", "content": _TOC_AI_PROMPT + toc_text[:8000]}],
+                "response_format": {"type": "json_object"},
+                "temperature": 0,
             },
             timeout=60,
         )
@@ -498,6 +500,8 @@ def extract_with_openrouter(pdf_path: str, model_id: str, openrouter_key: str):
             "messages": [
                 {"role": "user", "content": _DATA_PROMPT + "\n\nDocument text:\n" + extracted_text[:60000]},
             ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0,
         }
 
         for attempt in range(3):

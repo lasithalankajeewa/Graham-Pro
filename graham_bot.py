@@ -166,7 +166,7 @@ def extract_financial_data(uploaded_file):
             os.remove("temp_report_cropped.pdf")
 
 
-def extract_financial_data_openrouter(uploaded_file, model_id="openai/gpt-oss-120b:free"):
+def extract_financial_data_openrouter(uploaded_file, model_id="google/gemma-4-31b-it:free"):
     """OpenRouter path — saves upload to a temp file, delegates to headless core."""
     openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
     if not openrouter_key:
@@ -437,8 +437,8 @@ else:
         if uploaded_file:
             _MODELS = {
                 "Gemini 2.0 Flash": None,
-                "GPT-OSS 120B — OpenRouter (Free)": "openai/gpt-oss-120b:free",
                 "Gemma 4 31B — OpenRouter (Free)": "google/gemma-4-31b-it:free",
+                "Gemma 4 26B A4B — OpenRouter (Free)": "google/gemma-4-26b-a4b-it:free",
                 "DeepSeek V4 Flash — OpenRouter (Free)": "deepseek/deepseek-v4-flash:free",
             }
             col_model, col_btn = st.columns([3, 1])
@@ -1070,8 +1070,8 @@ else:
                             st.rerun()
 
             _CSE_MODELS_TAB = {
-                "GPT-OSS 120B (Free)": "openai/gpt-oss-120b:free",
                 "Gemma 4 31B (Free)": "google/gemma-4-31b-it:free",
+                "Gemma 4 26B A4B (Free)": "google/gemma-4-26b-a4b-it:free",
                 "DeepSeek V4 Flash (Free)": "deepseek/deepseek-v4-flash:free",
             }
             _cse_model_id = _CSE_MODELS_TAB[

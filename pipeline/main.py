@@ -45,7 +45,7 @@ def main():
         sys.exit(1)
 
     # model used for ALL pipeline analyses
-    model_id = os.getenv("PIPELINE_MODEL") or "openai/gpt-oss-120b:free"
+    model_id = os.getenv("PIPELINE_MODEL") or "google/gemma-4-31b-it:free"
 
     backfill_since = os.getenv("BACKFILL_SINCE") or None
 

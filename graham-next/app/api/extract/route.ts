@@ -33,7 +33,7 @@ export async function POST(req: Request) {
     } else if (process.env.OPENROUTER_API_KEY) {
       const pdfParse = (await import("pdf-parse")).default;
       const parsed = await pdfParse(bytes);
-      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", { method: "POST", headers: { Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`, "Content-Type": "application/json" }, body: JSON.stringify({ model: "openai/gpt-oss-120b:free", messages: [{ role: "user", content: `${prompt}\n\nREPORT:\n${parsed.text.slice(0, 100000)}` }] }) });
+      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", { method: "POST", headers: { Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`, "Content-Type": "application/json" }, body: JSON.stringify({ model: "google/gemma-4-31b-it:free", response_format: { type: "json_object" }, temperature: 0, messages: [{ role: "user", content: `${prompt}\n\nREPORT:\n${parsed.text.slice(0, 100000)}` }] }) });
       if (!response.ok) throw new Error(`OpenRouter error ${response.status}`);
       answer = (await response.json()).choices?.[0]?.message?.content || "";
     } else return NextResponse.json({ error: "Set GEMINI_API_KEY or OPENROUTER_API_KEY." }, { status: 503 });
